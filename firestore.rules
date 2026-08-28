@@ -1,0 +1,82 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: orders
+    // Document ID: auto-generated
+    // Fields:
+    //   - id: string (required)
+    //   - customer: map (required)
+    //   - items: list (required)
+    //   - totalAmount: number (required)
+    //   - status: string (required)
+    //   - createdAt: timestamp (optional/auto)
+    //   - authorUid: string (required)
+    //
+    // Collection: users
+    // Document ID: user uid
+    // Fields:
+    //   - username: string
+    //   - role: string ('admin', '销售', '财务', '助销', '仓管', 'pending')
+    //   - createdAt: timestamp
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == "admin@sheetorder.local" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['id', 'customer', 'items', 'totalAmount', 'status', 'authorUid']) &&
+             data.id is string &&
+             data.customer is map &&
+             data.items is list &&
+             data.totalAmount is number &&
+             data.status is string &&
+             data.authorUid is string;
+    }
+
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
+      allow update: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      // Allow any authenticated user to read orders
+      allow read: if isAuthenticated();
+      
+      // Allow authenticated user to create order if they set themselves as authorUid
+      allow create: if isAuthenticated() && isValidOrder(request.resource.data) && request.resource.data.authorUid == request.auth.uid;
+      
+      // Allow authenticated users to update orders (workflow / status transitions / remarks)
+      allow update: if isAuthenticated() && isValidOrder(request.resource.data);
+      
+      // Allow authenticated users to delete orders
+      allow delete: if isAuthenticated();
+    }
+
+    match /orderImages/{imageId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+  }
+}

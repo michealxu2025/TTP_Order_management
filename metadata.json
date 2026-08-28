@@ -1,0 +1,6 @@
+{
+  "name": "TTP order management",
+  "description": "An order management application with real-time Firestore synchronization, Google Sheets data integration, multi-role workflow, and offline caching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

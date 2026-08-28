@@ -1,0 +1,37 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "A customer order",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Human readable order ID like 260415-1" },
+        "customer": { "type": "object", "description": "Customer details" },
+        "items": { "type": "array", "description": "List of order items" },
+        "totalAmount": { "type": "number", "description": "Total price of the order" },
+        "status": { "type": "string", "description": "Order status" },
+        "createdAt": { "type": "timestamp", "description": "Creation time" },
+        "authorUid": { "type": "string", "description": "User ID of the creator" }
+      },
+      "required": ["id", "customer", "items", "totalAmount", "status", "createdAt", "authorUid"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "Global application setting",
+      "type": "object",
+      "properties": {
+        "maintenance": { "type": "boolean", "description": "True if system is under maintenance" }
+      }
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Collection of all orders"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/Setting" },
+      "description": "Global settings for the application"
+    }
+  }
+}
