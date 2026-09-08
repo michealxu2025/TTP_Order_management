@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { ShoppingCart, User, Package, Plus, Trash2, Save, CheckCircle2, AlertCircle, CheckSquare, Square, ChevronDown, ChevronUp, LogOut, List, ArrowLeft, ChevronRight, Edit2, X, Users, Shield, Printer, Star, FileSpreadsheet, Bell, BellOff, Image as ImageIcon, Loader2, Share2, Download, Eye, Copy, Check, ExternalLink } from 'lucide-react';
+import { ShoppingCart, User, Package, Plus, Trash2, Save, CheckCircle2, AlertCircle, CheckSquare, Square, ChevronDown, ChevronUp, LogOut, List, ArrowLeft, ChevronRight, Edit2, X, Users, Shield, Printer, Star, FileSpreadsheet, Bell, BellOff, Image as ImageIcon, Loader2, Share2, Download, Eye, Copy, Check, ExternalLink, FileText } from 'lucide-react';
 import html2canvas from 'html2canvas';
+import html2pdf from 'html2pdf.js';
 import * as XLSX from 'xlsx';
 import MaterialConfigurator from './components/MaterialConfigurator';
 import { db, auth, OperationType, handleFirestoreError } from './firebase';
@@ -253,31 +254,31 @@ export default function App() {
     }
   };
 
-  const orderImageRef = useRef<HTMLDivElement>(null);
+  const orderExportRef = useRef<HTMLDivElement>(null);
 
   const handleGenerateOrderImage = async () => {
-    if (!viewingOrder || !orderImageRef.current) {
-      console.error('Missing order or orderImageRef');
+    if (!viewingOrder || !orderExportRef.current) {
+      console.error('Missing order or orderExportRef');
       return;
     }
     
     setGeneratingImage(true);
-    const element = orderImageRef.current;
+    const element = orderExportRef.current;
     
-    // Temporarily position offscreen for clean rendering
+    // Temporarily bring element into layout flow for html2canvas rendering
     const originalDisplay = element.style.display;
     const originalPosition = element.style.position;
     const originalLeft = element.style.left;
     const originalTop = element.style.top;
     
     element.style.display = 'block';
-    element.style.position = 'fixed';
-    element.style.left = '-10000px';
+    element.style.position = 'static';
+    element.style.left = '0';
     element.style.top = '0';
 
     try {
       // Ensure layout and images have settled
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 250));
 
       const canvas = await html2canvas(element, {
         scale: 2.5,
@@ -286,8 +287,7 @@ export default function App() {
         backgroundColor: '#ffffff',
         logging: false,
         scrollY: 0,
-        scrollX: 0,
-        windowWidth: 1000
+        scrollX: 0
       });
 
       element.style.display = originalDisplay;
@@ -351,6 +351,113 @@ export default function App() {
       element.style.top = originalTop;
       setGeneratingImage(false);
       alert(t('生成图片失败，请重试', 'Échec de la génération de l\'image'));
+    }
+  };
+
+  const handleGenerateOrderPdf = async () => {
+    if (!viewingOrder || !orderExportRef.current) {
+      console.error('Missing order or orderExportRef');
+      return;
+    }
+    
+    setGeneratingPdf(true);
+    const element = orderExportRef.current;
+    
+    // Temporarily bring element into layout flow for html2pdf container cloning and dimension calculation
+    const originalDisplay = element.style.display;
+    const originalPosition = element.style.position;
+    const originalLeft = element.style.left;
+    const originalTop = element.style.top;
+    
+    element.style.display = 'block';
+    element.style.position = 'static';
+    element.style.left = '0';
+    element.style.top = '0';
+
+    try {
+      // Ensure layout and images have settled before cloning into html2pdf worker
+      await new Promise(r => setTimeout(r, 250));
+
+      const customerName = viewingOrder.customer?.['客户名'] || 'Client';
+      const totalAmount = viewingOrder.items?.reduce((sum: number, item: any) => sum + (item.totalPrice || 0), 0) || 0;
+      const filename = `${customerName}_${Math.round(totalAmount)}.pdf`;
+      
+      const opt = {
+        margin:       [10, 5, 10, 5] as [number, number, number, number],
+        filename:     filename,
+        image:        { type: 'jpeg' as const, quality: 0.98 },
+        html2canvas:  { 
+          scale: 2, 
+          useCORS: true,
+          allowTaint: true,
+          letterRendering: true,
+          logging: false,
+          scrollY: 0,
+          scrollX: 0
+        },
+        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' as const },
+        pagebreak:    { mode: ['css', 'legacy'], avoid: ['tr', 'h1', 'h2', 'h3'] }
+      };
+
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+      const restoreElement = () => {
+        element.style.display = originalDisplay;
+        element.style.position = originalPosition;
+        element.style.left = originalLeft;
+        element.style.top = originalTop;
+        setGeneratingPdf(false);
+      };
+
+      if (isMobile) {
+        // First generate as Blob for preview / share modal on mobile
+        html2pdf().set(opt).from(element).output('blob').then(async (pdfBlob: Blob) => {
+          restoreElement();
+
+          const url = URL.createObjectURL(pdfBlob);
+          setMobilePdfModal({
+            isOpen: true,
+            url,
+            filename,
+            blob: pdfBlob
+          });
+
+          // Try direct native share
+          const file = new File([pdfBlob], filename, { type: 'application/pdf' });
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            try {
+              await navigator.share({
+                files: [file],
+                title: filename,
+                text: `Bon de commande PDF - ${customerName}`
+              });
+            } catch (shareErr) {
+              console.log('Mobile share dismissed', shareErr);
+            }
+          }
+        }).catch((err: any) => {
+          console.error('Mobile PDF Blob Generation Error:', err);
+          restoreElement();
+          alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
+        });
+      } else {
+        // Desktop - Use standard save
+        html2pdf().set(opt).from(element).save().then(() => {
+          restoreElement();
+        }).catch((err: any) => {
+          console.error('PDF Generation Error:', err);
+          restoreElement();
+          alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
+        });
+      }
+    } catch (err: any) {
+      console.error('PDF Generation Setup Error:', err);
+      element.style.display = originalDisplay;
+      element.style.position = originalPosition;
+      element.style.left = originalLeft;
+      element.style.top = originalTop;
+      setGeneratingPdf(false);
+      alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
     }
   };
 
@@ -425,6 +532,7 @@ export default function App() {
   });
   const [debts, setDebts] = useState<Record<string, DebtItem[]>>({});
   const [generatingImage, setGeneratingImage] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
 
   const [loginLanguage, setLoginLanguage] = useState<'zh' | 'fr'>('zh');
   const isFrench = loginLanguage === 'fr';
@@ -886,6 +994,18 @@ export default function App() {
     filename: '',
     blob: null,
     copied: false
+  });
+
+  const [mobilePdfModal, setMobilePdfModal] = useState<{
+    isOpen: boolean;
+    url: string;
+    filename: string;
+    blob: Blob | null;
+  }>({
+    isOpen: false,
+    url: '',
+    filename: '',
+    blob: null
   });
 
   const resetForm = useCallback(() => {
@@ -3146,21 +3266,39 @@ export default function App() {
                 )}
 
                 {(userRole === 'admin' || userRole === '销售') && (
-                  <button
-                    onClick={handleGenerateOrderImage}
-                    disabled={generatingImage}
-                    className={`p-2 ${generatingImage ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'} text-white rounded-lg transition-colors flex items-center gap-1.5`}
-                    title={t("生成订单图片(Bon de Commande)", "Générer Image Commande")}
-                  >
-                    {generatingImage ? (
-                      <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-                    ) : (
-                      <ImageIcon className="w-4 h-4" />
-                    )}
-                    <span className="text-xs font-semibold hidden sm:inline">
-                      {generatingImage ? t('生成中...', 'Image...') : t('生成图片', 'Image')}
-                    </span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleGenerateOrderImage}
+                      disabled={generatingImage || generatingPdf}
+                      className={`p-2 ${generatingImage ? 'bg-indigo-300' : 'bg-indigo-600 hover:bg-indigo-700'} text-white rounded-lg transition-colors flex items-center gap-1.5 shadow-xs`}
+                      title={t("生成订单图片(Bon de Commande)", "Générer Image Commande")}
+                    >
+                      {generatingImage ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                      ) : (
+                        <ImageIcon className="w-4 h-4" />
+                      )}
+                      <span className="text-xs font-semibold hidden sm:inline">
+                        {generatingImage ? t('生成中...', 'Image...') : t('生成图片', 'Image')}
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={handleGenerateOrderPdf}
+                      disabled={generatingPdf || generatingImage}
+                      className={`p-2 ${generatingPdf ? 'bg-rose-300' : 'bg-rose-600 hover:bg-rose-700'} text-white rounded-lg transition-colors flex items-center gap-1.5 shadow-xs`}
+                      title={t("生成法语版PDF(Bon de Commande)", "Générer PDF Commande")}
+                    >
+                      {generatingPdf ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                      ) : (
+                        <FileText className="w-4 h-4" />
+                      )}
+                      <span className="text-xs font-semibold hidden sm:inline">
+                        {generatingPdf ? t('生成中...', 'PDF...') : t('生成PDF', 'PDF')}
+                      </span>
+                    </button>
+                  </div>
                 )}
 
                 {userRole === '仓管' && (
@@ -3540,7 +3678,7 @@ export default function App() {
             </div>
             </div>
 
-            <div ref={orderImageRef} style={{ display: 'none', position: 'fixed', left: '-10000px', top: 0, width: '200mm', background: 'white', padding: '10mm', boxSizing: 'border-box', color: 'black', fontFamily: 'Arial, sans-serif', zIndex: -1 }}>
+            <div ref={orderExportRef} style={{ display: 'none', position: 'static', width: '200mm', background: 'white', padding: '10mm', boxSizing: 'border-box', color: 'black', fontFamily: 'Arial, sans-serif' }}>
               <div style={{ textAlign: 'center', marginBottom: '30px' }}>
                 <h1 style={{ fontSize: '28px', margin: '0 0 10px 0', fontWeight: 'bold' }}>Bon de Commande</h1>
               </div>
@@ -3627,6 +3765,7 @@ export default function App() {
                                       <img 
                                         src={imageUrl} 
                                         alt="" 
+                                        crossOrigin="anonymous"
                                         style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
                                         referrerPolicy="no-referrer"
                                       />
@@ -5242,6 +5381,111 @@ export default function App() {
               >
                 <Download className="w-4 h-4 text-gray-500" />
                 {t("保存/下载图片 (PNG)", "Télécharger (PNG)")}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Order PDF Modal */}
+      {mobilePdfModal.isOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-[99991] p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl p-4 sm:p-6 max-w-md w-full shadow-2xl relative border border-gray-100 flex flex-col my-auto max-h-[95vh]">
+            {/* Close Button */}
+            <button 
+              onClick={() => {
+                if (mobilePdfModal.url) {
+                  URL.revokeObjectURL(mobilePdfModal.url);
+                }
+                setMobilePdfModal(prev => ({ ...prev, isOpen: false }));
+              }}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1.5 bg-gray-100 hover:bg-gray-200 rounded-full transition-colors z-10"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            {/* Header Icon & Title */}
+            <div className="flex items-center gap-3 mb-4 pr-8">
+              <div className="bg-rose-50 text-rose-600 p-2.5 rounded-xl flex items-center justify-center shrink-0">
+                <FileText className="w-6 h-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base sm:text-lg font-bold text-gray-900 truncate">
+                  {t("法语版 PDF 已生成", "PDF de Commande Généré")}
+                </h3>
+                <p className="text-xs text-gray-500 truncate">
+                  {mobilePdfModal.filename}
+                </p>
+              </div>
+            </div>
+
+            {/* PDF Info Card */}
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 mb-4 text-center">
+              <FileText className="w-12 h-12 text-rose-500 mx-auto mb-2 opacity-80" />
+              <div className="font-semibold text-sm text-gray-800 break-all mb-1">
+                {mobilePdfModal.filename}
+              </div>
+              <div className="text-xs text-gray-500">
+                {t("格式: PDF 电子文档 (适合正式打印与归档)", "Format: Document PDF officiel")}
+              </div>
+            </div>
+
+            {/* WeChat Tip */}
+            {/MicroMessenger/i.test(navigator.userAgent) && (
+              <div className="bg-amber-50/90 border border-amber-200 text-amber-900 px-3 py-2.5 rounded-xl text-xs mb-4 flex items-start gap-2">
+                <span className="text-sm shrink-0">💡</span>
+                <div className="leading-snug">
+                  <span className="font-semibold">{t("微信提示：", "Note WeChat : ")}</span>
+                  {t("若在微信中无法直接下载，可点击右上角【···】选择【在浏览器中打开】即可正常下载或发送。", "Si le téléchargement est bloqué dans WeChat, cliquez sur [···] puis 'Ouvrir dans le navigateur'.")}
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="space-y-2.5">
+              {/* Native share option */}
+              {navigator.canShare && mobilePdfModal.blob && (
+                <button
+                  onClick={async () => {
+                    if (mobilePdfModal.blob) {
+                      const file = new File([mobilePdfModal.blob], mobilePdfModal.filename, { type: 'application/pdf' });
+                      try {
+                        await navigator.share({
+                          files: [file],
+                          title: mobilePdfModal.filename,
+                          text: `Bon de commande - ${viewingOrder?.customer?.['客户名'] || ''}`
+                        });
+                      } catch (err) {
+                        console.error('Manual Web Share failed:', err);
+                      }
+                    }
+                  }}
+                  className="w-full py-2.5 px-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-1.5 shadow-md shadow-rose-100 transition-all"
+                >
+                  <Share2 className="w-4 h-4" />
+                  {t("一键系统分享 (微信/WhatsApp)", "Partager (WeChat / WhatsApp)")}
+                </button>
+              )}
+
+              {/* Direct Open Preview in New Tab */}
+              <a
+                href={mobilePdfModal.url}
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-2.5 px-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all text-center"
+              >
+                <Eye className="w-4 h-4 text-gray-600" />
+                {t("在线预览 PDF", "Visualiser le PDF")}
+              </a>
+
+              {/* Direct Download */}
+              <a
+                href={mobilePdfModal.url}
+                download={mobilePdfModal.filename}
+                className="w-full py-2.5 px-3 bg-white hover:bg-gray-50 text-gray-700 rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-1.5 border border-gray-200 transition-all text-center"
+              >
+                <Download className="w-4 h-4 text-gray-500" />
+                {t("下载保存 PDF 文件", "Télécharger le PDF")}
               </a>
             </div>
           </div>
