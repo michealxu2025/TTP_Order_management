@@ -59,11 +59,11 @@ service cloud.firestore {
     }
 
     match /orders/{orderId} {
-      // Allow any authenticated user to read orders
-      allow read: if isAuthenticated();
+      // Allow reading orders so customer portal and sales can retrieve order history reliably
+      allow read: if true;
       
-      // Allow authenticated user to create order if they set themselves as authorUid
-      allow create: if isAuthenticated() && isValidOrder(request.resource.data) && request.resource.data.authorUid == request.auth.uid;
+      // Allow authenticated user to create order if they provide valid fields
+      allow create: if isAuthenticated() && isValidOrder(request.resource.data);
       
       // Allow authenticated users to update orders (workflow / status transitions / remarks)
       allow update: if isAuthenticated() && isValidOrder(request.resource.data);
@@ -77,6 +77,11 @@ service cloud.firestore {
       allow create: if isAuthenticated();
       allow update: if isAuthenticated();
       allow delete: if isAuthenticated();
+    }
+
+    match /customer_credentials/{credId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
     }
   }
 }

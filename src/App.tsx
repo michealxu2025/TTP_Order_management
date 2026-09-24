@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { ShoppingCart, User, Package, Plus, Trash2, Save, CheckCircle2, AlertCircle, CheckSquare, Square, ChevronDown, ChevronUp, LogOut, List, ArrowLeft, ChevronRight, Edit2, X, Users, Shield, Printer, Star, FileSpreadsheet, Bell, BellOff, Image as ImageIcon, Loader2, Share2, Download, Eye, Copy, Check, ExternalLink, FileText } from 'lucide-react';
+import { ShoppingCart, User, Package, Plus, Trash2, Save, CheckCircle2, AlertCircle, CheckSquare, Square, ChevronDown, ChevronUp, LogOut, List, ArrowLeft, ChevronRight, Edit2, X, Users, Shield, Printer, Star, FileSpreadsheet, Bell, BellOff, Image as ImageIcon, Loader2, Share2, Download, Eye, Copy, Check, ExternalLink, FileText, Key, EyeOff } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import html2pdf from 'html2pdf.js';
 import * as XLSX from 'xlsx';
 import MaterialConfigurator from './components/MaterialConfigurator';
+import CustomerPortal from './components/CustomerPortal';
 import { db, auth, OperationType, handleFirestoreError } from './firebase';
 import { collection, addDoc, getDocs, onSnapshot, query, orderBy, doc, setDoc, getDoc, serverTimestamp, updateDoc, deleteDoc, where } from 'firebase/firestore';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, User as FirebaseUser, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from 'firebase/auth';
@@ -165,6 +166,17 @@ const RemarkImage = ({ imageId, onZoom }: { imageId: string, onZoom: (src: strin
 };
 
 export default function App() {
+  // Check if navigating to customer ordering portal (/client or ?portal=client)
+  const isCustomerPortalRoute = typeof window !== 'undefined' && (
+    window.location.pathname.startsWith('/client') || 
+    window.location.hash.startsWith('#client') ||
+    new URLSearchParams(window.location.search).get('portal') === 'client'
+  );
+
+  if (isCustomerPortalRoute) {
+    return <CustomerPortal />;
+  }
+
   const [currentView, setCurrentView] = useState<'list' | 'create' | 'detail' | 'users'>('list');
   const [viewingOrder, setViewingOrder] = useState<Order | null>(null);
   const [printMode, setPrintMode] = useState<'normal' | 'french'>('normal');
@@ -174,6 +186,33 @@ export default function App() {
   const [salesFilter, setSalesFilter] = useState<string[]>([]);
   const [orderIdFilter, setOrderIdFilter] = useState<string[]>([]);
   const [customerNameFilter, setCustomerNameFilter] = useState<string[]>([]);
+
+  // Customer credentials management for Sales & Admin
+  const [custAccountField, setCustAccountField] = useState('');
+  const [custPasswordField, setCustPasswordField] = useState('');
+  const [showCustPassField, setShowCustPassField] = useState(false);
+  const [savingCustomerCredentials, setSavingCustomerCredentials] = useState(false);
+  const [credSaveFeedback, setCredSaveFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  // Dedicated customer accounts modal for sales/admin
+  const [showCustomerAccountsModal, setShowCustomerAccountsModal] = useState(false);
+  const [accountModalSearch, setAccountModalSearch] = useState('');
+  const [editingCredKey, setEditingCredKey] = useState<string | null>(null);
+  const [credEditAccount, setCredEditAccount] = useState('');
+  const [credEditPassword, setCredEditPassword] = useState('');
+  const [savingCredRow, setSavingCredRow] = useState(false);
+
+  // Google Sheets Webhook Sync settings
+  const [showSheetSyncConfig, setShowSheetSyncConfig] = useState(false);
+  const [sheetWebhookUrl, setSheetWebhookUrl] = useState('https://script.google.com/macros/s/AKfycbzVHPKwcAeofnU0A_U5OuZvGss7S_XaGRTIxs0owDOc15weiXgOEbn7LcRI4Q-vFXHkQQ/exec');
+  const [savingSheetWebhook, setSavingSheetWebhook] = useState(false);
+  const [testingSheetWebhook, setTestingSheetWebhook] = useState(false);
+  const [sheetSyncStatus, setSheetSyncStatus] = useState<{ hasWebhook?: boolean; hasServiceAccount?: boolean; webhookUrl?: string; serviceAccountEmail?: string } | null>({
+    hasWebhook: true,
+    webhookUrl: 'https://script.google.com/macros/s/AKfycbzVHPKwcAeofnU0A_U5OuZvGss7S_XaGRTIxs0owDOc15weiXgOEbn7LcRI4Q-vFXHkQQ/exec'
+  });
+  const [copyCodeSuccess, setCopyCodeSuccess] = useState(false);
+  const [rowSyncFeedback, setRowSyncFeedback] = useState<{ type: 'success' | 'warning' | 'info'; msg: string } | null>(null);
 
   const [isSalesFilterOpen, setIsSalesFilterOpen] = useState(false);
   const [isOrderIdFilterOpen, setIsOrderIdFilterOpen] = useState(false);
@@ -674,9 +713,13 @@ export default function App() {
       '已作废': 'Annulé',
       '已撤回': 'Retiré',
       '草稿': 'Brouillon',
+      '待销售审核': 'En attente commercial',
+      '销售退回': 'Rejeté commercial',
       // FR to CN (for reverse mapping)
       'Nouveau': '新建',
       'En attente': '待审核',
+      'En attente commercial': '待销售审核',
+      'Rejeté commercial': '销售退回',
       'Confirmé (Ass.)': '助销已确认',
       'Confirmé (Compta)': '财务已确认',
       'Preparer les machandises': '已通知备货',
@@ -1028,6 +1071,9 @@ export default function App() {
     setGeneratedOrderId('');
     setIsOrderIdEdited(false);
     setOrderRemarks('');
+    setCustAccountField('');
+    setCustPasswordField('');
+    setCredSaveFeedback(null);
     setCurrentStep(1);
   }, [userRole, userName]);
 
@@ -1124,6 +1170,9 @@ export default function App() {
     setGeneratedOrderId(order.id);
     setIsOrderIdEdited(true);
     setSelectedSalesInCreate(order.customer?.['销售'] || '');
+    setCustAccountField(order.customer?.['客户账号'] || '');
+    setCustPasswordField(order.customer?.['客户密码'] || '');
+    setCredSaveFeedback(null);
     
     setCurrentStep(1);
     setCurrentView('create');
@@ -1145,6 +1194,9 @@ export default function App() {
         ...initialCust,
         '备注': ''
       });
+      setCustAccountField('');
+      setCustPasswordField('');
+      setCredSaveFeedback(null);
     } else {
       const cust = idxStr !== '' ? customers[Number(idxStr)] : null;
       if (cust) {
@@ -1152,11 +1204,229 @@ export default function App() {
           ...cust,
           '备注': cust['备注'] || ''
         });
+        setCustAccountField(cust['客户账号'] || '');
+        setCustPasswordField(cust['客户密码'] || '');
+        setCredSaveFeedback(null);
       } else {
         setEditableCustomer(null);
+        setCustAccountField('');
+        setCustPasswordField('');
+        setCredSaveFeedback(null);
       }
     }
   };
+
+  const handleSaveCustomerCredentials = async () => {
+    if (!editableCustomer) return;
+    const customerCode = (editableCustomer['客户代码'] || '').trim();
+    const customerName = (editableCustomer['客户名'] || '').trim();
+    if (!customerCode && !customerName) {
+      alert(t('请先选择有效客户', 'Veuillez d\'abord choisir un client valide'));
+      return;
+    }
+
+    if (userRole === '销售') {
+      const custSales = String(editableCustomer?.['销售'] || '').trim().toLowerCase();
+      const mySales = String(userName || '').trim().toLowerCase();
+      if (mySales && custSales && custSales !== mySales) {
+        alert(t('权限不足：您只能修改自己名下的客户账号密码', 'Vous ne pouvez modifier que les identifiants de vos propres clients'));
+        return;
+      }
+    }
+
+    setSavingCustomerCredentials(true);
+    setCredSaveFeedback(null);
+    try {
+      const res = await fetch('/api/customers/update-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerCode,
+          customerName,
+          account: custAccountField,
+          password: custPasswordField,
+          sales: editableCustomer['销售'] || userName || ''
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        let msg = t('✓ 账号密码已更新并即时生效！', '✓ Identifiants enregistrés avec succès !');
+        if (data.sheetSync?.synced) {
+          msg = t('✓ 账号密码已保存，并已成功写入 Google 表格 J、K 列！', '✓ Synchronisé sur Google Sheets (col J & K) !');
+        } else if (data.sheetSync?.method === 'webhook' || data.sheetSync?.method === 'service_account') {
+          msg = `${t('✓ 系统已生效，但写入 Google 表格失败: ', '✓ Actif dans le système, mais échec Sheets : ')}${data.sheetSync.message}`;
+        }
+        setCredSaveFeedback({
+          type: 'success',
+          msg
+        });
+        setEditableCustomer((prev: any) => ({
+          ...prev,
+          '客户账号': custAccountField,
+          '客户密码': custPasswordField
+        }));
+        setCustomers((prev) =>
+          prev.map((c) => {
+            const match =
+              (customerCode && (c['客户代码'] || '').trim() === customerCode) ||
+              (customerName && (c['客户名'] || '').trim() === customerName);
+            if (match) {
+              return {
+                ...c,
+                '客户账号': custAccountField,
+                '客户密码': custPasswordField
+              };
+            }
+            return c;
+          })
+        );
+        setTimeout(() => setCredSaveFeedback(null), 5000);
+      } else {
+        setCredSaveFeedback({
+          type: 'error',
+          msg: data.error || t('更新失败，请重试', 'Échec de mise à jour')
+        });
+      }
+    } catch (err: any) {
+      setCredSaveFeedback({
+        type: 'error',
+        msg: err.message || t('网络错误，请重试', 'Erreur réseau')
+      });
+    } finally {
+      setSavingCustomerCredentials(false);
+    }
+  };
+
+  const handleSaveRowCredential = async (cust: any) => {
+    const code = (cust['客户代码'] || '').trim();
+    const name = (cust['客户名'] || '').trim();
+    if (!code && !name) return;
+
+    if (userRole === '销售') {
+      const custSales = String(cust['销售'] || '').trim().toLowerCase();
+      const mySales = String(userName || '').trim().toLowerCase();
+      if (mySales && custSales && custSales !== mySales) {
+        alert(t('权限不足：您只能修改自己名下的客户账号密码', 'Vous ne pouvez modifier que les identifiants de vos propres clients'));
+        return;
+      }
+    }
+
+    setSavingCredRow(true);
+    try {
+      const res = await fetch('/api/customers/update-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerCode: code,
+          customerName: name,
+          account: credEditAccount,
+          password: credEditPassword,
+          sales: cust['销售'] || userName || ''
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCustomers((prev) =>
+          prev.map((c) => {
+            const match =
+              (code && (c['客户代码'] || '').trim() === code) ||
+              (name && (c['客户名'] || '').trim() === name);
+            if (match) {
+              return {
+                ...c,
+                '客户账号': credEditAccount,
+                '客户密码': credEditPassword
+              };
+            }
+            return c;
+          })
+        );
+        setEditingCredKey(null);
+        if (data.sheetSync?.synced) {
+          setRowSyncFeedback({
+            type: 'success',
+            msg: t('✓ 账号密码已保存，并已成功写入 Google 表格 J、K 列！', '✓ Synchronisé sur Google Sheets (col J & K) !')
+          });
+        } else if (data.sheetSync?.method === 'webhook' || data.sheetSync?.method === 'service_account') {
+          setRowSyncFeedback({
+            type: 'warning',
+            msg: `${t('系统账号已更新，但写入 Google 表格失败: ', 'Mis à jour, échec Sheets : ')}${data.sheetSync.message}`
+          });
+        } else {
+          setRowSyncFeedback({
+            type: 'info',
+            msg: t('系统账号已保存生效（未配置 Google 表格写入通道，请点击上方“Google 表格同步”配置）', 'Enregistré (Sheets non configuré)')
+          });
+        }
+        setTimeout(() => setRowSyncFeedback(null), 6000);
+      } else {
+        alert(data.error || '更新失败');
+      }
+    } catch (err: any) {
+      alert('更新失败: ' + err.message);
+    } finally {
+      setSavingCredRow(false);
+    }
+  };
+
+  const handleSaveSheetWebhook = async () => {
+    setSavingSheetWebhook(true);
+    try {
+      const res = await fetch('/api/google-sheets/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhookUrl: sheetWebhookUrl.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSheetSyncStatus((prev: any) => ({
+          ...prev,
+          webhookUrl: sheetWebhookUrl.trim(),
+          hasWebhook: Boolean(sheetWebhookUrl.trim())
+        }));
+        alert(t('✓ Google 表格 Webhook 同步地址已成功保存！后续修改客户账号密码将自动写入 Google 表格 J、K 列。', '✓ URL Webhook Google Sheets enregistrée !'));
+      }
+    } catch (err: any) {
+      alert(t('保存失败: ', 'Erreur: ') + err.message);
+    } finally {
+      setSavingSheetWebhook(false);
+    }
+  };
+
+  const handleTestSheetWebhook = async () => {
+    setTestingSheetWebhook(true);
+    try {
+      const res = await fetch('/api/google-sheets/test-webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhookUrl: sheetWebhookUrl.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert(t('✓ Webhook 连通性测试成功！Google Apps Script 响应正常，能够正常接收写入请求。', '✓ Test de connexion réussi ! Google Apps Script répond correctement.'));
+      } else {
+        alert(t('✕ Webhook 测试失败: ', '✕ Échec du test : ') + (data.message || data.error));
+      }
+    } catch (err: any) {
+      alert(t('✕ 网络连接失败: ', '✕ Erreur réseau : ') + err.message);
+    } finally {
+      setTestingSheetWebhook(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showCustomerAccountsModal) {
+      fetch('/api/google-sheets/config')
+        .then((r) => r.json())
+        .then((data) => {
+          setSheetSyncStatus(data);
+          if (data.webhookUrl) {
+            setSheetWebhookUrl(data.webhookUrl);
+          }
+        })
+        .catch((e) => console.warn('Failed to load sheet sync config:', e));
+    }
+  }, [showCustomerAccountsModal]);
 
   useEffect(() => {
     let unsubUserDoc: (() => void) | null = null;
@@ -1491,7 +1761,7 @@ export default function App() {
       if (userRole === 'admin') {
         visibleByRole = true;
       } else if (userRole === '助销') {
-        visibleByRole = o.status !== '草稿';
+        visibleByRole = !['草稿', '待销售审核', '销售退回'].includes(o.status);
       } else if (userRole === '销售') {
         const currentSalesName = (o.customer?.['销售'] || '').trim().toLowerCase();
         const myName = (userName || '').trim().toLowerCase();
@@ -1507,6 +1777,18 @@ export default function App() {
 
       return visibleByRole;
     });
+  }, [orders, userRole, userName, currentUser]);
+
+  const pendingReviewCount = useMemo(() => {
+    if (userRole !== '销售' && userRole !== 'admin') return 0;
+    return orders.filter(o => {
+      if (o.status !== '待销售审核') return false;
+      if (userRole === 'admin') return true;
+      const s1 = (o.customer?.['销售'] || '').trim().toLowerCase();
+      const s2 = (o.salespersonName || '').trim().toLowerCase();
+      const my = (userName || '').trim().toLowerCase();
+      return s1 === my || s2 === my || o.authorUid === currentUser?.uid;
+    }).length;
   }, [orders, userRole, userName, currentUser]);
 
   const uniqueSales = useMemo(() => {
@@ -1612,11 +1894,27 @@ export default function App() {
   }, [uniqueCustomerNames, availableCustomerNames, customerNameFilter]);
 
   const displayedOrders = useMemo(() => {
-    return visibleOrders.filter(o => {
+    const list = visibleOrders.filter(o => {
       const matchSales = salesFilter.length === 0 || salesFilter.includes(o.customer?.['销售'] || '无销售');
       const matchOrderId = orderIdFilter.length === 0 || (o.id && orderIdFilter.includes(o.id)) || false;
       const matchCustomerName = customerNameFilter.length === 0 || customerNameFilter.includes(o.customer?.['客户名'] || '无客户');
       return matchSales && matchOrderId && matchCustomerName;
+    });
+
+    // 销售界面：当客户新建订单时，订单号默认为new order，并在销售界面置顶显示
+    return list.slice().sort((a, b) => {
+      const isTopOrder = (order: any) => {
+        const idLower = (order.id || '').trim().toLowerCase();
+        return idLower === 'new order' || (order.createdByCustomer && order.status === '待销售审核');
+      };
+      const aTop = isTopOrder(a);
+      const bTop = isTopOrder(b);
+      if (aTop && !bTop) return -1;
+      if (!aTop && bTop) return 1;
+
+      const aTime = a.createdAt?.seconds ? a.createdAt.seconds * 1000 : (a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0);
+      const bTime = b.createdAt?.seconds ? b.createdAt.seconds * 1000 : (b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0);
+      return bTime - aTime;
     });
   }, [visibleOrders, salesFilter, orderIdFilter, customerNameFilter]);
 
@@ -2181,8 +2479,22 @@ export default function App() {
         return;
       }
 
-      // If Firestore query succeeded and returned no user at all, reject
+      // If Firestore query succeeded and returned no employee user, check if this is a customer account!
       if (!isFirestoreBlocked && !userDocData && cleanUsername !== 'admin' && cleanUsername !== 'admin123') {
+        try {
+          const custRes = await fetch('/api/customer/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account: cleanUsername, password: loginPassword })
+          });
+          const custData = await custRes.json();
+          if (custRes.ok && custData.success && custData.customer) {
+            localStorage.setItem('ttp_client_session', JSON.stringify(custData.customer));
+            window.location.href = '/client';
+            return;
+          }
+        } catch (e) {}
+
         setLoginError('用户名或密码错误');
         return;
       }
@@ -2415,6 +2727,15 @@ export default function App() {
             >
               {t('登录系统', 'Se connecter')}
             </button>
+            <div className="mt-4 pt-3 border-t border-gray-100 text-center">
+              <a
+                href="/client"
+                className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 font-semibold hover:underline"
+              >
+                <span>👉</span>
+                <span>{t('客户专用订货入口 (Espace Client)', 'Accès Espace Client')}</span>
+              </a>
+            </div>
           </form>
         </div>
       </div>
@@ -2478,8 +2799,30 @@ export default function App() {
                   {t('账号', 'Comptes')}
                 </button>
               )}
+              {(userRole === 'admin' || userRole === '销售') && (
+                <button 
+                  onClick={() => setShowCustomerAccountsModal(true)}
+                  className="px-3 py-1.5 text-sm font-medium rounded-md flex items-center gap-1.5 transition-colors whitespace-nowrap text-gray-600 hover:text-gray-900 hover:bg-white"
+                  title={t('管理客户自主下单账号密码', 'Gérer les comptes clients')}
+                >
+                  <Key className="w-4 h-4 text-blue-600" />
+                  {t('客户账号', 'Comptes Clients')}
+                </button>
+              )}
             </div>
           </div>
+          {pendingReviewCount > 0 && (userRole === '销售' || userRole === 'admin') && (
+            <button
+              onClick={() => {
+                setCurrentView('list');
+              }}
+              className="animate-pulse px-3 py-1.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-all"
+              title={t('有客户自主提交的订单等待您审核', 'Commandes clients en attente de validation')}
+            >
+              <span className="text-sm">🔔</span>
+              <span>{t(`客户订单待审核 (${pendingReviewCount})`, `Commandes Clients (${pendingReviewCount})`)}</span>
+            </button>
+          )}
           <div className="header-tools border-l-0 sm:border-l sm:pl-4 border-gray-200">
             <button
               onClick={requestNotificationPermission}
@@ -2556,6 +2899,15 @@ export default function App() {
           >
             <Users className="w-5 h-5" />
             <span className="text-[10px] font-bold uppercase">{t('账号', 'Comptes')}</span>
+          </button>
+        )}
+        {(userRole === 'admin' || userRole === '管理员' || userRole === '销售') && (
+          <button 
+            onClick={() => setShowCustomerAccountsModal(true)}
+            className="flex flex-col items-center gap-1 p-2 rounded-lg transition-colors text-gray-500 hover:text-blue-600"
+          >
+            <Key className="w-5 h-5 text-blue-600" />
+            <span className="text-[10px] font-bold uppercase">{t('客户账号', 'Clients')}</span>
           </button>
         )}
         <button 
@@ -2939,7 +3291,14 @@ export default function App() {
                               setCurrentView('detail');
                             }}
                           >
-                            {order.id}
+                            <div className="flex items-center gap-1.5">
+                              {((order.id || '').trim().toLowerCase() === 'new order' || (order.createdByCustomer && order.status === '待销售审核')) && (
+                                <span className="bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow-xs animate-pulse">
+                                  {t('置顶', 'PIN')}
+                                </span>
+                              )}
+                              <span>{order.id}</span>
+                            </div>
                           </td>
                           <td className="px-6 py-4 text-gray-600">
                             {order.customer?.['销售'] || '无销售'}
@@ -2953,12 +3312,16 @@ export default function App() {
                             </td>
                           )}
                           <td className="px-6 py-4">
-                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                              order.status === '草稿' 
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                              order.status === '待销售审核'
+                                ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                : order.status === '销售退回'
+                                ? 'bg-red-100 text-red-900 border border-red-300'
+                                : order.status === '草稿' 
                                 ? 'bg-gray-100 text-gray-700 border border-gray-200' 
                                 : 'bg-blue-100 text-blue-800'
                             }`}>
-                              {translateStatus(order.status)}
+                              {order.status === '待销售审核' ? t('待销售审核', 'En attente commercial') : translateStatus(order.status)}
                             </span>
                           </td>
                           <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
@@ -2977,6 +3340,15 @@ export default function App() {
                             {order.createdAt?.toDate ? order.createdAt.toDate().toLocaleString() : new Date().toLocaleString()}
                           </td>
                           <td className="px-6 py-4 text-right">
+                            {(userRole === 'admin' || userRole === '销售') && order.status === '待销售审核' && (
+                              <button 
+                                onClick={(e) => { e.stopPropagation(); handleUpdateOrderStatus(order._docId, '新建'); }}
+                                className="text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 mr-3 px-2 py-0.5 rounded font-bold transition-colors"
+                                title={t('审核通过并提交至助销', 'Valider et transmettre')}
+                              >
+                                {t('审核通过', 'Valider')}
+                              </button>
+                            )}
                             {userRole === '助销' && order.status === '新建' && (
                               <button 
                                 onClick={(e) => { e.stopPropagation(); handleUpdateOrderStatus(order._docId, '助销已确认'); }}
@@ -3042,7 +3414,8 @@ export default function App() {
                       if (['财务已确认', '已通知备货', '已叫车'].includes(status)) cardClass = "bg-red-200 border-red-300 p-4 rounded-xl shadow-sm active:scale-[0.98]";
                       else if (status === '已发货') cardClass = "bg-green-200 border-green-300 p-4 rounded-xl shadow-sm active:scale-[0.98]";
                     } else if (userRole === '销售' || userRole === 'admin') {
-                      if (status === '已发货') cardClass = "bg-green-200 border-green-300 p-4 rounded-xl shadow-sm active:scale-[0.98]";
+                      if (status === '待销售审核') cardClass = "bg-amber-100 border-amber-300 p-4 rounded-xl shadow-sm active:scale-[0.98]";
+                      else if (status === '已发货') cardClass = "bg-green-200 border-green-300 p-4 rounded-xl shadow-sm active:scale-[0.98]";
                     }
 
                     return (
@@ -3056,15 +3429,24 @@ export default function App() {
                       >
                         <div className="flex justify-between items-start mb-2">
                           <div className="flex items-center gap-2">
+                            {((order.id || '').trim().toLowerCase() === 'new order' || (order.createdByCustomer && order.status === '待销售审核')) && (
+                              <span className="bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow-xs animate-pulse">
+                                {t('置顶', 'PIN')}
+                              </span>
+                            )}
                             <span className="text-sm font-bold text-blue-600">#{order.id}</span>
                             {order.isPriority && <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />}
                           </div>
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
-                            order.status === '草稿'
+                            order.status === '待销售审核'
+                              ? 'bg-amber-200 text-amber-900 border-amber-400'
+                              : order.status === '销售退回'
+                              ? 'bg-red-200 text-red-900 border-red-400'
+                              : order.status === '草稿'
                               ? 'bg-gray-100 text-gray-700 border-gray-200'
                               : 'bg-blue-600 text-white border-blue-600'
                           }`}>
-                            {translateStatus(order.status)}
+                            {order.status === '待销售审核' ? t('待销售审核', 'En attente commercial') : translateStatus(order.status)}
                           </span>
                         </div>
                         <div className="mb-4">
@@ -3079,6 +3461,14 @@ export default function App() {
                             <div className="font-bold text-red-600 text-base">CFA {order.totalAmount?.toLocaleString()}</div>
                           ) : <div />}
                           <div className="flex gap-2" onClick={e => e.stopPropagation()}>
+                            {(userRole === 'admin' || userRole === '销售') && order.status === '待销售审核' && (
+                              <button 
+                                onClick={() => handleUpdateOrderStatus(order._docId, '新建')}
+                                className="bg-emerald-600 text-white px-3 py-1 rounded-lg text-xs font-bold shadow-xs hover:bg-emerald-700"
+                              >
+                                {t('审核通过', 'Valider')}
+                              </button>
+                            )}
                             {userRole === '助销' && order.status === '新建' && (
                               <button 
                                 onClick={() => handleUpdateOrderStatus(order._docId, '助销已确认')}
@@ -3152,7 +3542,7 @@ export default function App() {
                 ) : (
                   <div className="flex items-center gap-2">
                     <h2 className="text-xl font-bold text-gray-800">#{viewingOrder.id}</h2>
-                    {(userRole === 'admin' || userRole === '助销') && (
+                    {(userRole === 'admin' || userRole === '助销' || userRole === '销售') && (
                       <button 
                         onClick={() => { setOrderIdInput(viewingOrder.id); setIsEditingOrderId(true); }} 
                         className="text-blue-500"
@@ -3166,11 +3556,15 @@ export default function App() {
 
               <div className="flex flex-wrap items-center gap-2">
                 <span className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase border ${
-                  viewingOrder.status === '草稿'
+                  viewingOrder.status === '待销售审核'
+                    ? 'bg-amber-100 text-amber-900 border-amber-300'
+                    : viewingOrder.status === '销售退回'
+                    ? 'bg-red-100 text-red-900 border-red-300'
+                    : viewingOrder.status === '草稿'
                     ? 'bg-gray-100 text-gray-700 border-gray-200'
                     : 'bg-blue-600 text-white border-blue-600'
                 }`}>
-                  {translateStatus(viewingOrder.status)}
+                  {viewingOrder.status === '待销售审核' ? t('客户自主下单·待销售审核', 'En attente commercial') : translateStatus(viewingOrder.status)}
                 </span>
                 {viewingOrder.isPriority && (
                   <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-yellow-400 text-yellow-900 flex items-center gap-1">
@@ -3181,6 +3575,43 @@ export default function App() {
 
               <div className="flex flex-wrap items-center gap-2 ml-0 sm:ml-auto">
                 {/* Workflow Buttons */}
+                {(userRole === '销售' || userRole === 'admin') && viewingOrder.status === '待销售审核' && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button 
+                      onClick={() => handleUpdateOrderStatus(viewingOrder._docId, '新建')}
+                      className="bg-emerald-600 text-white hover:bg-emerald-700 px-3.5 py-2 rounded-lg text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      {t('审核通过 (转为正式单)', 'Valider la commande')}
+                    </button>
+                    <button 
+                      onClick={() => handleEditOrder(viewingOrder)}
+                      className="bg-blue-600 text-white hover:bg-blue-700 px-3.5 py-2 rounded-lg text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                      {t('修改订单内容', 'Modifier')}
+                    </button>
+                    <button 
+                      onClick={async () => {
+                        const reason = window.prompt(t('请输入退回原因 (客户可在手机端看到):', 'Raison du rejet (visible par le client):'));
+                        if (reason !== null) {
+                          const logMsg = `[销售退回说明]: ${reason}`;
+                          const updatedRemarks = viewingOrder.remarks ? `${viewingOrder.remarks}\n${logMsg}` : logMsg;
+                          await updateDoc(doc(db, 'orders', viewingOrder._docId), {
+                            status: '销售退回',
+                            remarks: updatedRemarks,
+                            updatedAt: serverTimestamp()
+                          });
+                          setViewingOrder({ ...viewingOrder, status: '销售退回', remarks: updatedRemarks });
+                        }
+                      }}
+                      className="bg-red-600 text-white hover:bg-red-700 px-3.5 py-2 rounded-lg text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                      {t('退回给客户', 'Rejeter')}
+                    </button>
+                  </div>
+                )}
                 {userRole === '助销' && viewingOrder.status === '新建' && (
                   <button 
                     onClick={() => handleUpdateOrderStatus(viewingOrder._docId, '助销已确认')}
@@ -4207,6 +4638,79 @@ export default function App() {
                     />
                   </div>
                 </div>
+
+                {/* Customer login credentials management (STRICTLY Sales & Admin only, hidden from others) */}
+                {(userRole === '销售' || userRole === 'admin') && (
+                  <div className="mt-4 pt-3.5 border-t border-blue-200 bg-blue-50/80 p-4 rounded-xl border border-blue-100 shadow-2xs">
+                    <div className="flex flex-wrap items-center justify-between mb-3 gap-2">
+                      <div className="flex items-center gap-1.5 font-bold text-xs text-blue-900">
+                        <Key className="w-4 h-4 text-blue-600" />
+                        <span>{t('客户登录凭证 (客户自主订货端专用)', 'Identifiants Espace Client (Accès Client)')}</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={savingCustomerCredentials}
+                        onClick={handleSaveCustomerCredentials}
+                        className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                      >
+                        {savingCustomerCredentials ? (
+                          <span>{t('保存中...', 'Enregistrement...')}</span>
+                        ) : (
+                          <>
+                            <Save className="w-3.5 h-3.5" />
+                            <span>{t('保存客户账号密码', 'Enregistrer')}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
+                          {t('客户账号 (Identifiant)', 'Identifiant')}
+                        </label>
+                        <input
+                          type="text"
+                          className="theme-input w-full bg-white text-xs px-3 py-2 border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 font-medium"
+                          value={custAccountField}
+                          onChange={(e) => setCustAccountField(e.target.value)}
+                          placeholder={t('例如: boulo_sall', 'ex: boulo_sall')}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
+                          {t('客户密码 (Mot de passe)', 'Mot de passe')}
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showCustPassField ? "text" : "password"}
+                            className="theme-input w-full bg-white text-xs px-3 py-2 pr-9 border border-blue-200 rounded-lg font-mono focus:ring-2 focus:ring-blue-500"
+                            value={custPasswordField}
+                            onChange={(e) => setCustPasswordField(e.target.value)}
+                            placeholder={t('设置或修改客户密码', 'Mot de passe')}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowCustPassField(!showCustPassField)}
+                            className="absolute right-2.5 top-2.5 text-gray-400 hover:text-gray-600 p-0.5"
+                          >
+                            {showCustPassField ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {credSaveFeedback && (
+                      <div className={`mt-2.5 p-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 ${
+                        credSaveFeedback.type === 'success' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-red-100 text-red-800 border border-red-200'
+                      }`}>
+                        {credSaveFeedback.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-green-600" /> : <AlertCircle className="w-4 h-4 text-red-600" />}
+                        <span>{credSaveFeedback.msg}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {userRole !== '仓管' && (() => {
                   const stats = getCustomerCreditStats(editableCustomer);
@@ -5487,6 +5991,510 @@ export default function App() {
                 <Download className="w-4 h-4 text-gray-500" />
                 {t("下载保存 PDF 文件", "Télécharger le PDF")}
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Customer Accounts Management Modal for Sales and Admin */}
+      {showCustomerAccountsModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-[99990] p-3 sm:p-6 overflow-y-auto">
+          <div className="bg-white rounded-2xl p-4 sm:p-6 max-w-4xl w-full shadow-2xl relative border border-gray-100 flex flex-col my-auto max-h-[92vh]">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-gray-100">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-blue-50 text-blue-600 rounded-xl">
+                  <Key className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-bold text-gray-900">
+                      {userRole === '销售'
+                        ? t('我的客户账号管理', 'Gestion des Comptes de Mes Clients')
+                        : t('客户自主下单账号管理', 'Gestion des Comptes Clients (Espace Client)')}
+                    </h3>
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-blue-100 text-blue-800">
+                      {userRole === '销售' ? `${userName || t('销售', 'Commercial')}` : t('管理员', 'Admin')}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {userRole === '销售'
+                      ? t(
+                          '各个销售仅能查看和修改属于自己的客户账号与密码。配置修改后即时生效。',
+                          'Chaque commercial ne peut consulter et modifier que ses propres clients.'
+                        )
+                      : t(
+                          '管理员可查看与修改所有客户账号密码，并可配置 Google 表格同步。',
+                          'L\'administrateur peut voir et modifier tous les comptes clients.'
+                        )}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowCustomerAccountsModal(false);
+                  setEditingCredKey(null);
+                }}
+                className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Search & Actions Bar */}
+            <div className="flex flex-col sm:flex-row gap-3 py-4 items-stretch sm:items-center justify-between border-b border-gray-100">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={accountModalSearch}
+                  onChange={(e) => setAccountModalSearch(e.target.value)}
+                  placeholder={
+                    userRole === '销售'
+                      ? t('在我的客户中搜索客户名称、代码或账号...', 'Rechercher parmi mes clients...')
+                      : t('搜索客户名称、代码、账号或归属销售...', 'Rechercher client, code, identifiant...')
+                  }
+                  className="theme-input w-full text-xs pl-3 pr-8 py-2 border border-gray-300 rounded-lg"
+                />
+                {accountModalSearch && (
+                  <button
+                    onClick={() => setAccountModalSearch('')}
+                    className="absolute right-2.5 top-2.5 text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 text-xs">
+                {(userRole === 'admin' || userRole === '管理员') && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSheetSyncConfig(!showSheetSyncConfig)}
+                    className={`px-3 py-1.5 rounded-lg border font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs ${
+                      sheetSyncStatus?.hasWebhook
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                        : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
+                    }`}
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>{t('Google 表格 J/K列 同步设置', 'Synchro Google Sheets')}</span>
+                    {sheetSyncStatus?.hasWebhook ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 bg-emerald-100/80 px-1.5 py-0.5 rounded font-mono">
+                        ✓ 已打通
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-amber-700 bg-amber-100/80 px-1.5 py-0.5 rounded font-mono">
+                        待配置
+                      </span>
+                    )}
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showSheetSyncConfig ? 'rotate-180' : ''}`} />
+                  </button>
+                )}
+
+                {userRole !== 'admin' && userRole !== '管理员' && sheetSyncStatus?.hasWebhook && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-emerald-700 bg-emerald-50 border border-emerald-200 font-medium">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>{t('Google 表格同步已连通', 'Synchro Sheets active')}</span>
+                  </span>
+                )}
+
+                <div className="flex items-center gap-1 text-gray-500">
+                  <span>{t('客户专用入口:', 'Lien Client :')}</span>
+                  <a
+                    href="/client"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono text-blue-600 hover:underline flex items-center gap-1 font-semibold bg-blue-50 px-2 py-1 rounded border border-blue-200"
+                  >
+                    <span>/client</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* Google Sheets Sync Configuration Panel (Expandable, Strictly Admin only) */}
+            {(userRole === 'admin' || userRole === '管理员') && showSheetSyncConfig && (
+              <div className="my-3 p-4 bg-gradient-to-r from-emerald-50/70 to-blue-50/70 border border-emerald-200 rounded-xl space-y-3.5 text-xs text-gray-700">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-200/60 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <div className="p-1.5 bg-emerald-600 text-white rounded-lg">
+                      <FileSpreadsheet className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-gray-900">
+                        {t('Google 表格 J 列 (账号) & K 列 (密码) 实时写入配置', 'Configuration de synchronisation Google Sheets (Colonnes J & K)')}
+                      </h4>
+                      <p className="text-[11px] text-gray-500">
+                        {t(
+                          'Google 表格默认的公开 CSV 链接是【只读】的。通过下方的免费 Apps Script 脚本（1分钟搞定），系统修改账号密码即可自动回写到云端表格的 J/K 列！',
+                          'Le lien CSV public est en lecture seule. Un script Apps Script permet d\'écrire directement dans les colonnes J et K.'
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <span
+                    className={`px-2.5 py-1 rounded-full font-bold text-[11px] self-start sm:self-auto border ${
+                      sheetSyncStatus?.hasWebhook
+                        ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                        : 'bg-amber-100 text-amber-800 border-amber-300'
+                    }`}
+                  >
+                    {sheetSyncStatus?.hasWebhook
+                      ? t('● Webhook 同步中 (已打通)', '● Webhook actif')
+                      : t('○ 仅系统本地保存 (待配置表格写入)', '○ Enregistré localement')}
+                  </span>
+                </div>
+
+                {/* Webhook URL Input & Action Buttons */}
+                <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                  <div className="relative flex-1">
+                    <input
+                      type="url"
+                      value={sheetWebhookUrl}
+                      onChange={(e) => setSheetWebhookUrl(e.target.value)}
+                      placeholder="https://script.google.com/macros/s/AKfycb.../exec"
+                      className="theme-input w-full text-xs font-mono px-3 py-2 border border-gray-300 rounded-lg bg-white"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={testingSheetWebhook}
+                      onClick={handleTestSheetWebhook}
+                      className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-2xs disabled:opacity-50 cursor-pointer"
+                      title={t('向 Webhook 发送心跳检测，测试 Google 表格回写通道是否通畅', 'Tester la connectivité du webhook')}
+                    >
+                      {testingSheetWebhook ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>{t('测试中...', 'Test...')}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>⚡</span>
+                          <span>{t('测试连接', 'Tester')}</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingSheetWebhook}
+                      onClick={handleSaveSheetWebhook}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-50 cursor-pointer"
+                    >
+                      {savingSheetWebhook ? t('保存中...', 'Enregistrement...') : t('保存 Webhook 地址', 'Enregistrer')}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 1-Minute Setup Guide */}
+                <div className="bg-white/80 border border-emerald-200/80 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-gray-800 flex items-center gap-1.5">
+                      <span>🚀</span>
+                      <span>{t('1 分钟极速配置教程 (粘贴到 Google 表格)', 'Tutoriel rapide (1 minute)')}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const scriptCode = `function doPost(e) {
+  try {
+    var contents = JSON.parse(e.postData.contents);
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // 匹配包含客户资料的工作表 (支持按 GID 或按工作表名称匹配)
+    var sheet = null;
+    var sheets = ss.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      if (contents.gid && sheets[i].getSheetId().toString() === contents.gid.toString()) {
+        sheet = sheets[i];
+        break;
+      }
+    }
+    if (!sheet) {
+      sheet = ss.getSheetByName("客户") || ss.getSheetByName("Customers") || sheets[0];
+    }
+    
+    var data = sheet.getDataRange().getValues();
+    var headers = data[0];
+    
+    var codeCol = headers.indexOf("客户代码");
+    var nameCol = headers.indexOf("客户名");
+    var accCol = headers.indexOf("客户账号");
+    var pwdCol = headers.indexOf("客户密码");
+    
+    // 若表头没有“客户账号”或“客户密码”，自动在表头末尾补充 (J列/K列)
+    if (accCol === -1) {
+      accCol = headers.length;
+      sheet.getRange(1, accCol + 1).setValue("客户账号");
+    }
+    if (pwdCol === -1) {
+      pwdCol = accCol + 1;
+      sheet.getRange(1, pwdCol + 1).setValue("客户密码");
+    }
+    
+    var updated = false;
+    for (var r = 1; r < data.length; r++) {
+      var rowCode = (codeCol !== -1 ? String(data[r][codeCol]).trim() : "");
+      var rowName = (nameCol !== -1 ? String(data[r][nameCol]).trim() : "");
+      
+      if ((contents.customerCode && rowCode === String(contents.customerCode).trim()) ||
+          (contents.customerName && rowName === String(contents.customerName).trim())) {
+        
+        // 将账号写入 J 列，密码写入 K 列
+        sheet.getRange(r + 1, accCol + 1).setValue(contents.account || "");
+        sheet.getRange(r + 1, pwdCol + 1).setValue(contents.password || "");
+        updated = true;
+        break;
+      }
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({
+      success: true,
+      updated: updated
+    })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false,
+      error: err.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}`;
+                        navigator.clipboard.writeText(scriptCode);
+                        setCopyCodeSuccess(true);
+                        setTimeout(() => setCopyCodeSuccess(false), 3000);
+                      }}
+                      className="px-2.5 py-1 text-xs font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-md border border-blue-200 transition-colors flex items-center gap-1 cursor-pointer"
+                    >
+                      {copyCodeSuccess ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copyCodeSuccess ? t('✓ 代码已复制到剪贴板', '✓ Copié !') : t('一键复制代码', 'Copier le script')}</span>
+                    </button>
+                  </div>
+
+                  <ol className="list-decimal list-inside space-y-1 text-[11px] text-gray-600 leading-relaxed">
+                    <li>
+                      {t(
+                        '打开您的客户 Google 表格，点击顶部菜单【扩展程序 (Extensions)】→【Apps Script】。',
+                        'Ouvrez Google Sheets, cliquez sur Extensions → Apps Script.'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        '清空编辑器内的原有代码，点击右上角【一键复制代码】并粘贴到编辑器中。',
+                        'Collez le code copié dans l\'éditeur Apps Script.'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        '点击右上角蓝色【部署 (Deploy)】按钮 →【新建部署 (New deployment)】。',
+                        'Cliquez sur Déployer → Nouveau déploiement.'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        '点击齿轮⚙选择【网页应用 (Web app)】：执行身份选择【我 (Me)】，谁可以访问选择【任何人 (Anyone)】。',
+                        'Sélectionnez Application Web, exécuter en tant que : Moi, accès : Tout le monde.'
+                      )}
+                    </li>
+                    <li>
+                      {t(
+                        '点击【部署】，授权后复制生成的【网页应用网址】(以 /exec 结尾)，粘贴到上方输入框点击保存即可！',
+                        'Copiez l\'URL de l\'application Web terminée et collez-la ci-dessus.'
+                      )}
+                    </li>
+                  </ol>
+                </div>
+              </div>
+            )}
+
+            {/* Row Sync Feedback Banner */}
+            {rowSyncFeedback && (
+              <div
+                className={`my-2 p-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-all ${
+                  rowSyncFeedback.type === 'success'
+                    ? 'bg-green-50 text-green-800 border border-green-200'
+                    : rowSyncFeedback.type === 'warning'
+                    ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                    : 'bg-blue-50 text-blue-800 border border-blue-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {rowSyncFeedback.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-green-600" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-amber-600" />
+                  )}
+                  <span>{rowSyncFeedback.msg}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRowSyncFeedback(null)}
+                  className="text-gray-400 hover:text-gray-600 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Customer List Table */}
+            <div className="overflow-y-auto flex-1 my-2 border border-gray-200 rounded-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-gray-50 text-gray-700 sticky top-0 border-b border-gray-200">
+                  <tr>
+                    <th className="p-3 font-semibold">{t('客户名称', 'Nom')}</th>
+                    <th className="p-3 font-semibold">{t('客户代码', 'Code')}</th>
+                    <th className="p-3 font-semibold">{t('归属销售', 'Commercial')}</th>
+                    <th className="p-3 font-semibold">{t('客户账号 (Identifiant)', 'Identifiant')}</th>
+                    <th className="p-3 font-semibold">{t('客户密码 (Mot de passe)', 'Mot de passe')}</th>
+                    <th className="p-3 font-semibold text-right">{t('操作', 'Action')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {(() => {
+                    const isSalesRole = userRole === '销售';
+                    const mySalesName = (userName || '').trim().toLowerCase();
+
+                    const filteredCustList = customers.filter((c) => {
+                      if (isSalesRole) {
+                        const custSales = (c['销售'] || '').trim().toLowerCase();
+                        if (!mySalesName || custSales !== mySalesName) {
+                          return false;
+                        }
+                      }
+                      if (!accountModalSearch.trim()) return true;
+                      const q = accountModalSearch.toLowerCase();
+                      const name = (c['客户名'] || '').toLowerCase();
+                      const code = (c['客户代码'] || '').toLowerCase();
+                      const sales = (c['销售'] || '').toLowerCase();
+                      const acc = (c['客户账号'] || '').toLowerCase();
+                      return name.includes(q) || code.includes(q) || sales.includes(q) || acc.includes(q);
+                    });
+
+                    if (filteredCustList.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={6} className="text-center py-12 text-gray-400">
+                            <div className="flex flex-col items-center justify-center gap-1.5">
+                              <Users className="w-8 h-8 text-gray-300" />
+                              <p className="font-medium text-gray-600 text-xs">
+                                {isSalesRole
+                                  ? t(`未找到归属于销售 "${userName}" 的客户`, `Aucun client trouvé pour le commercial "${userName}"`)
+                                  : t('没有找到匹配的客户', 'Aucun client trouvé')}
+                              </p>
+                              {isSalesRole && (
+                                <p className="text-[11px] text-gray-400 max-w-sm text-center">
+                                  {t('系统根据表格中的“销售”列与您的登录姓名进行严格匹配。', 'Les clients sont associés selon la colonne Commercial et votre nom.')}
+                                </p>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return filteredCustList.map((c, idx) => {
+                      const rowKey = c['客户代码'] || c['客户名'] || `cust-${idx}`;
+                      const isEditing = editingCredKey === rowKey;
+
+                      return (
+                        <tr key={rowKey} className="hover:bg-blue-50/40 transition-colors">
+                          <td className="p-3 font-medium text-gray-900">{c['客户名']}</td>
+                          <td className="p-3 font-mono text-gray-600">{c['客户代码'] || '-'}</td>
+                          <td className="p-3 text-gray-600">{c['销售'] || '-'}</td>
+                          <td className="p-3">
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                value={credEditAccount}
+                                onChange={(e) => setCredEditAccount(e.target.value)}
+                                className="theme-input text-xs px-2 py-1 border border-blue-300 rounded font-medium w-full min-w-[120px]"
+                                placeholder="输入账号"
+                              />
+                            ) : c['客户账号'] ? (
+                              <span className="font-mono font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                                {c['客户账号']}
+                              </span>
+                            ) : (
+                              <span className="text-gray-400 italic">{t('未配置', 'Non défini')}</span>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                value={credEditPassword}
+                                onChange={(e) => setCredEditPassword(e.target.value)}
+                                className="theme-input text-xs px-2 py-1 border border-blue-300 rounded font-mono w-full min-w-[120px]"
+                                placeholder="输入密码"
+                              />
+                            ) : c['客户密码'] ? (
+                              <span className="font-mono text-gray-700 bg-gray-50 px-2 py-0.5 rounded border border-gray-200">
+                                {c['客户密码']}
+                              </span>
+                            ) : (
+                              <span className="text-gray-400 italic">{t('未配置', 'Non défini')}</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-right">
+                            {isEditing ? (
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={savingCredRow}
+                                  onClick={() => handleSaveRowCredential(c)}
+                                  className="px-2.5 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-semibold shadow-xs disabled:opacity-50 cursor-pointer"
+                                >
+                                  {savingCredRow ? t('保存中', '...') : t('保存', 'Enregistrer')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingCredKey(null)}
+                                  className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs font-medium cursor-pointer"
+                                >
+                                  {t('取消', 'Annuler')}
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingCredKey(rowKey);
+                                    setCredEditAccount(c['客户账号'] || (c['客户代码'] || '').toLowerCase() || '');
+                                    setCredEditPassword(c['客户密码'] || '123456');
+                                  }}
+                                  className="px-2.5 py-1 text-blue-600 hover:text-blue-800 hover:bg-blue-50 font-medium rounded flex items-center gap-1 border border-transparent hover:border-blue-200 transition-colors cursor-pointer"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                  <span>{c['客户账号'] ? t('修改', 'Modifier') : t('设置账号', 'Définir')}</span>
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Footer */}
+            <div className="pt-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
+              <div>
+                {t('提示: 客户可在任意手机浏览器打开客户网址，直接使用账号密码登录下单。', 'Note: Les clients peuvent se connecter avec leurs identifiants sur mobile.')}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCustomerAccountsModal(false);
+                  setEditingCredKey(null);
+                }}
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-lg font-medium transition-colors cursor-pointer"
+              >
+                {t('关闭', 'Fermer')}
+              </button>
             </div>
           </div>
         </div>

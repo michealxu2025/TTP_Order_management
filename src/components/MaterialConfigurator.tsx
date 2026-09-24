@@ -50,6 +50,58 @@ interface Props {
   isFrench?: boolean;
   todayConsumption?: Record<string, number>;
   compact?: boolean;
+  maskStock?: boolean;
+}
+
+const MASKED_STOCK_CACHE_KEY = 'ttp_masked_stock_cache';
+
+/**
+ * 客户库存脱敏规则：
+ * 1. 实际库存扣除当日占用后，除以10算出计算值
+ * 2. 计算值 > 200：显示 180 ～ 220 之间的随机数
+ * 3. 计算值在 80 ～ 200：显示 80 ～ 120 之间的随机数
+ * 4. 计算值 < 80：显示 0（状态标为 Épuisé 售罄），并限制下单
+ * 5. 随机数一旦生成，就不要变了（持久化缓存）
+ */
+function getMaskedStock(itemKey: string, actualStock: number, todayConsumed: number): { displayStock: number; isSoldOut: boolean } {
+  const actualAvailable = Math.max(0, actualStock - todayConsumed);
+  const calcValue = actualAvailable / 10;
+
+  if (calcValue < 80) {
+    return { displayStock: 0, isSoldOut: true };
+  }
+
+  let cache: Record<string, { value: number; range: string }> = {};
+  try {
+    const raw = localStorage.getItem(MASKED_STOCK_CACHE_KEY);
+    if (raw) cache = JSON.parse(raw);
+  } catch (e) {}
+
+  const rangeType = calcValue > 200 ? '>200' : '80-200';
+  const cachedEntry = cache[itemKey];
+
+  if (cachedEntry && cachedEntry.range === rangeType) {
+    if (rangeType === '>200' && cachedEntry.value >= 180 && cachedEntry.value <= 220) {
+      return { displayStock: cachedEntry.value, isSoldOut: false };
+    }
+    if (rangeType === '80-200' && cachedEntry.value >= 80 && cachedEntry.value <= 120) {
+      return { displayStock: cachedEntry.value, isSoldOut: false };
+    }
+  }
+
+  let generatedValue: number;
+  if (rangeType === '>200') {
+    generatedValue = Math.floor(180 + Math.random() * (220 - 180 + 1));
+  } else {
+    generatedValue = Math.floor(80 + Math.random() * (120 - 80 + 1));
+  }
+
+  cache[itemKey] = { value: generatedValue, range: rangeType };
+  try {
+    localStorage.setItem(MASKED_STOCK_CACHE_KEY, JSON.stringify(cache));
+  } catch (e) {}
+
+  return { displayStock: generatedValue, isSoldOut: false };
 }
 
 export default function MaterialConfigurator({
@@ -63,7 +115,8 @@ export default function MaterialConfigurator({
   translateColor,
   isFrench,
   todayConsumption = {},
-  compact = false
+  compact = false,
+  maskStock = false
 }: Props) {
   const [totalQuantity, setTotalQuantity] = useState<number | ''>('');
   const [manualQuantities, setManualQuantities] = useState<Record<string, number>>({});
@@ -74,6 +127,12 @@ export default function MaterialConfigurator({
     const code = (c[' 物料编码 '] || (c as any)['物料编码'] || '').trim();
     const base = Number(c['可用量']) || 0;
     const consumed = todayConsumption[code] || 0;
+    
+    if (maskStock) {
+      const itemKey = code || `${materialCode}_${c['颜色']}`;
+      return getMaskedStock(itemKey, base, consumed).displayStock;
+    }
+    
     return Math.max(0, base - consumed);
   };
 
@@ -284,8 +343,18 @@ export default function MaterialConfigurator({
           ) : (
             <span style={{fontSize: '0.6rem', color: '#94a3b8'}}>{isFrench ? 'Pas d\'image' : '无图片'}</span>
           )}
-          <div style={{position: 'absolute', bottom: '4px', right: '4px', background: 'rgba(255,255,255,0.9)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.65rem', fontWeight: 'bold', color: totalAvailable < 100 ? '#ef4444' : 'var(--accent)'}}>
-            {totalAvailable} {isFrench ? 'Disp' : '库存'}
+          <div style={{
+            position: 'absolute', 
+            bottom: '4px', 
+            right: '4px', 
+            background: totalAvailable <= 0 ? '#ef4444' : 'rgba(255,255,255,0.92)', 
+            padding: '2px 6px', 
+            borderRadius: '4px', 
+            fontSize: '0.65rem', 
+            fontWeight: 'bold', 
+            color: totalAvailable <= 0 ? '#ffffff' : (totalAvailable < 100 ? '#ef4444' : 'var(--accent)')
+          }}>
+            {totalAvailable <= 0 ? (isFrench ? 'Épuisé' : '售罄') : `${totalAvailable} ${isFrench ? 'Disp' : '库存'}`}
           </div>
         </div>
 
@@ -316,6 +385,7 @@ export default function MaterialConfigurator({
               type="number"
               min="0"
               max={totalAvailable}
+              disabled={totalAvailable <= 0}
               className="theme-input no-spin"
               style={{
                 flex: 1,
@@ -323,7 +393,9 @@ export default function MaterialConfigurator({
                 fontSize: '0.9rem',
                 fontWeight: 'bold',
                 borderColor: isActive ? 'var(--primary)' : 'var(--border)',
-                textAlign: 'center'
+                textAlign: 'center',
+                backgroundColor: totalAvailable <= 0 ? '#f8fafc' : 'white',
+                cursor: totalAvailable <= 0 ? 'not-allowed' : 'text'
               }}
               value={totalQuantity}
               onChange={(e) => {
@@ -332,7 +404,7 @@ export default function MaterialConfigurator({
                 setTotalQuantity(val);
                 setManualQuantities({});
               }}
-              placeholder="0"
+              placeholder={totalAvailable <= 0 ? (isFrench ? 'Épuisé' : '售罄') : '0'}
             />
           </div>
 
@@ -374,17 +446,21 @@ export default function MaterialConfigurator({
                   {availableColors.map((c, idx) => {
                     const key = getInvKey(c, idx);
                     const realAvailable = getRealTimeStockCount(c);
+                    const isOutOfStock = realAvailable <= 0;
                     const qty = itemQuantities[key] || '';
                     const isManual = key in manualQuantities;
                     if (realAvailable <= 0 && qty <= 0) return null;
                     return (
                       <div key={key} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px', borderBottom: '1px solid #f1f5f9', fontSize: '0.7rem'}}>
                         <span style={{flex: 1}}>{translateColor ? translateColor(c['颜色']) : c['颜色']}</span>
-                        <span style={{color: '#94a3b8', fontSize: '0.65rem', marginRight: '8px'}}>({realAvailable})</span>
+                        <span style={{color: isOutOfStock ? '#ef4444' : '#94a3b8', fontSize: '0.65rem', marginRight: '8px', fontWeight: isOutOfStock ? 'bold' : 'normal'}}>
+                          {isOutOfStock ? (isFrench ? 'Épuisé' : '售罄') : `(${realAvailable})`}
+                        </span>
                         <input 
                           type="number"
                           min="0"
                           max={realAvailable}
+                          disabled={isOutOfStock}
                           style={{
                             width: '45px',
                             padding: '2px',
@@ -392,7 +468,9 @@ export default function MaterialConfigurator({
                             borderColor: isManual ? 'var(--primary)' : '#e2e8f0',
                             borderRadius: '2px',
                             textAlign: 'center',
-                            fontSize: '0.7rem'
+                            fontSize: '0.7rem',
+                            backgroundColor: isOutOfStock ? '#f1f5f9' : 'white',
+                            cursor: isOutOfStock ? 'not-allowed' : 'text'
                           }}
                           value={qty}
                           onChange={(e) => handleManualQuantityChange(key, e.target.value, realAvailable)}
@@ -416,12 +494,12 @@ export default function MaterialConfigurator({
           {selectedMaterialPrice['图片'] ? (
             <img 
               src={selectedMaterialPrice['图片']} 
-              alt="物料图片" 
+              alt={isFrench ? "Image produit" : "物料图片"} 
               referrerPolicy="no-referrer" 
               style={{cursor: 'zoom-in'}}
               onClick={() => onZoomImage(selectedMaterialPrice['图片'])}
             />
-          ) : '[暂无图片]'}
+          ) : (isFrench ? '[Aucune image]' : '[暂无图片]')}
         </div>
         <div>
           <div className="info-label" style={{fontSize: '0.7rem'}}>{isFrench ? `Tarification (${customerLevel})` : `当前级别定价 (${customerLevel}级)`}</div>

@@ -22,6 +22,20 @@
       "properties": {
         "maintenance": { "type": "boolean", "description": "True if system is under maintenance" }
       }
+    },
+    "CustomerCredential": {
+      "title": "CustomerCredential",
+      "description": "Customer login credentials managed by sales and admin",
+      "type": "object",
+      "properties": {
+        "customerCode": { "type": "string", "description": "Customer code" },
+        "customerName": { "type": "string", "description": "Customer name" },
+        "account": { "type": "string", "description": "Customer login account" },
+        "password": { "type": "string", "description": "Customer login password" },
+        "sales": { "type": "string", "description": "Assigned salesperson" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" }
+      },
+      "required": ["customerCode", "account", "password"]
     }
   },
   "firestore": {
@@ -32,6 +46,10 @@
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/Setting" },
       "description": "Global settings for the application"
+    },
+    "/customer_credentials/{credId}": {
+      "schema": { "$ref": "#/entities/CustomerCredential" },
+      "description": "Customer credentials store"
     }
   }
 }
