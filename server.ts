@@ -19,8 +19,33 @@ const CUSTOMERS_URL = 'https://docs.google.com/spreadsheets/d/1sL-g0IiPox4FymR4Q
 const PRICES_URL = 'https://docs.google.com/spreadsheets/d/1sL-g0IiPox4FymR4Qt8Ru1ErqXZXuZLRxfM-_1wOE9A/export?format=csv&gid=432782581';
 const DEBTS_URL = 'https://docs.google.com/spreadsheets/d/190CYOeWCVB68eCOszi7VwADf3N3jHwN7msmI1jmgzlg/gviz/tq?tqx=out:csv&gid=155272922';
 
+interface DebtOrderItem {
+  materialName: string;
+  category?: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  settledAmount?: number;
+  unsettledAmount: number;
+}
+
+interface ServerDebtItem {
+  orderNo?: string;
+  dueDate: string;
+  amount: number;
+  totalAmount?: number;
+  settledAmount?: number;
+  businessDate?: string;
+  salesperson?: string;
+  customerName?: string;
+  customerCode?: string;
+  city?: string;
+  remarks?: string;
+  items?: DebtOrderItem[];
+}
+
 let debtsCache: {
-  data: Record<string, { dueDate: string; amount: number }[]>;
+  data: Record<string, ServerDebtItem[]>;
   lastFetched: number;
 } | null = null;
 
@@ -529,6 +554,17 @@ app.get('/api/debts', async (req, res) => {
     let dueDateIdx = 12;   // M column (0-indexed: 12) - 到期日
     let custCodeIdx = 14;  // O column (0-indexed: 14) - 客户编码 / 客户代码
     let custNameIdx = 3;   // D column (0-indexed: 3) - 客户
+    let orderNoIdx = 0;    // A column (0-indexed: 0) - 出库单号
+    let dateIdx = 2;       // C column (0-indexed: 2) - 业务日期
+    let salesIdx = 4;      // E column (0-indexed: 4) - 销售员
+    let catIdx = 5;        // F column (0-indexed: 5) - 品类
+    let nameIdx = 6;       // G column (0-indexed: 6) - 物料名称
+    let qtyIdx = 7;        // H column (0-indexed: 7) - 计价数量
+    let priceIdx = 8;      // I column (0-indexed: 8) - 单价
+    let totalIdx = 9;      // J column (0-indexed: 9) - 价税合计
+    let settledIdx = 10;   // K column (0-indexed: 10) - 已结算金额
+    let cityIdx = 13;      // N column (0-indexed: 13) - 城市
+    let remarksIdx = 15;   // P column (0-indexed: 15) - 备注
 
     headers.forEach((h: string, i: number) => {
       const headerStr = String(h || '').trim();
@@ -536,10 +572,21 @@ app.get('/api/debts', async (req, res) => {
       if (headerStr.includes('到期')) dueDateIdx = i;
       if (headerStr.includes('客户编码') || headerStr.includes('客户代码')) custCodeIdx = i;
       if (headerStr === '客户' || headerStr === '客户名' || headerStr === '客户名称') custNameIdx = i;
+      if (headerStr.includes('单号')) orderNoIdx = i;
+      if (headerStr.includes('业务日期')) dateIdx = i;
+      if (headerStr.includes('销售')) salesIdx = i;
+      if (headerStr.includes('品类')) catIdx = i;
+      if (headerStr.includes('物料名称')) nameIdx = i;
+      if (headerStr.includes('计价数量')) qtyIdx = i;
+      if (headerStr.includes('单价')) priceIdx = i;
+      if (headerStr.includes('价税合计')) totalIdx = i;
+      if (headerStr.includes('已结算')) settledIdx = i;
+      if (headerStr.includes('城市')) cityIdx = i;
+      if (headerStr.includes('备注')) remarksIdx = i;
     });
 
-    const customerDebtsByCode: Record<string, Record<string, number>> = {};
-    const customerDebtsByName: Record<string, Record<string, number>> = {};
+    const customerOrdersByCode: Record<string, Record<string, ServerDebtItem>> = {};
+    const customerOrdersByName: Record<string, Record<string, ServerDebtItem>> = {};
 
     for (let i = 1; i < records.length; i++) {
       const row = records[i];
@@ -551,46 +598,84 @@ app.get('/api/debts', async (req, res) => {
       const amt = parseFloat(rawAmt);
       if (!amt || isNaN(amt) || amt <= 0) continue;
 
+      const orderNo = (row[orderNoIdx] || '').trim() || `ORD-${i}`;
       let dueDate = (row[dueDateIdx] || '').trim();
       if (!dueDate) dueDate = '未定到期日';
 
-      if (custCode) {
-        if (!customerDebtsByCode[custCode]) {
-          customerDebtsByCode[custCode] = {};
-        }
-        customerDebtsByCode[custCode][dueDate] = (customerDebtsByCode[custCode][dueDate] || 0) + amt;
-      }
+      const businessDate = (row[dateIdx] || '').trim();
+      const salesperson = (row[salesIdx] || '').trim();
+      const city = (row[cityIdx] || '').trim();
+      const remarks = (row[remarksIdx] || '').trim();
+      const category = (row[catIdx] || '').trim();
+      const materialName = (row[nameIdx] || '').trim();
+      const quantity = parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0;
+      const unitPrice = parseFloat((row[priceIdx] || '0').replace(/,/g, '')) || 0;
+      const totalPrice = parseFloat((row[totalIdx] || '0').replace(/,/g, '')) || (quantity * unitPrice);
+      const settledAmount = parseFloat((row[settledIdx] || '0').replace(/,/g, '')) || 0;
 
-      if (custName) {
-        const normName = custName.toLowerCase();
-        if (!customerDebtsByName[normName]) {
-          customerDebtsByName[normName] = {};
+      const item: DebtOrderItem = {
+        materialName,
+        category,
+        quantity,
+        unitPrice,
+        totalPrice,
+        settledAmount,
+        unsettledAmount: amt
+      };
+
+      const addOrder = (map: Record<string, Record<string, ServerDebtItem>>, key: string) => {
+        if (!map[key]) map[key] = {};
+        if (!map[key][orderNo]) {
+          map[key][orderNo] = {
+            orderNo,
+            dueDate,
+            amount: 0,
+            totalAmount: 0,
+            settledAmount: 0,
+            businessDate,
+            salesperson,
+            customerName: custName,
+            customerCode: custCode,
+            city,
+            remarks,
+            items: []
+          };
         }
-        customerDebtsByName[normName][dueDate] = (customerDebtsByName[normName][dueDate] || 0) + amt;
-      }
+        const ord = map[key][orderNo];
+        ord.amount = Math.round((ord.amount + amt) * 100) / 100;
+        ord.totalAmount = Math.round(((ord.totalAmount || 0) + totalPrice) * 100) / 100;
+        ord.settledAmount = Math.round(((ord.settledAmount || 0) + settledAmount) * 100) / 100;
+        if (!ord.businessDate && businessDate) ord.businessDate = businessDate;
+        if (!ord.salesperson && salesperson) ord.salesperson = salesperson;
+        if (!ord.city && city) ord.city = city;
+        if (!ord.remarks && remarks) ord.remarks = remarks;
+        if (!ord.items) ord.items = [];
+        ord.items.push(item);
+      };
+
+      if (custCode) addOrder(customerOrdersByCode, custCode);
+      if (custName) addOrder(customerOrdersByName, custName.toLowerCase());
     }
 
-    const buildList = (dateMap: Record<string, number>) => {
-      const list = Object.entries(dateMap).map(([dueDate, amount]) => ({
-        dueDate,
-        amount
-      }));
-      // Sort chronologically
+    const buildList = (ordersMap: Record<string, ServerDebtItem>): ServerDebtItem[] => {
+      const list = Object.values(ordersMap);
       list.sort((a, b) => {
-        const normA = a.dueDate.replace(/[/\.]/g, '-');
-        const normB = b.dueDate.replace(/[/\.]/g, '-');
-        return normA.localeCompare(normB);
+        const normA = (a.dueDate || '').replace(/[/\.]/g, '-');
+        const normB = (b.dueDate || '').replace(/[/\.]/g, '-');
+        const cmp = normA.localeCompare(normB);
+        if (cmp !== 0) return cmp;
+        return (a.orderNo || '').localeCompare(b.orderNo || '');
       });
       return list;
     };
 
-    const result: Record<string, { dueDate: string; amount: number }[]> = {};
-    for (const [code, dateMap] of Object.entries(customerDebtsByCode)) {
-      result[code] = buildList(dateMap);
+    const result: Record<string, ServerDebtItem[]> = {};
+    for (const [code, ordersMap] of Object.entries(customerOrdersByCode)) {
+      result[code] = buildList(ordersMap);
     }
-    for (const [name, dateMap] of Object.entries(customerDebtsByName)) {
+    for (const [name, ordersMap] of Object.entries(customerOrdersByName)) {
       if (!result[name]) {
-        result[name] = buildList(dateMap);
+        result[name] = buildList(ordersMap);
       }
     }
 

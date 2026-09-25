@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   ShoppingCart, Package, User, 
   LogOut, CheckCircle2, AlertCircle, Eye, EyeOff, Search, 
   Plus, Trash2, ChevronRight, ChevronDown, ChevronUp, 
   FileText, X, ArrowLeft, Download, 
-  RefreshCw, Star, Loader2, MessageSquare, ImageIcon
+  RefreshCw, Star, Loader2, MessageSquare, ImageIcon, Share2, CreditCard,
+  ExternalLink, Calendar, MapPin
 } from 'lucide-react';
 import { 
   collection, query, onSnapshot, addDoc, 
@@ -17,8 +18,7 @@ import {
   User as FirebaseUser
 } from 'firebase/auth';
 import { db, auth } from '../firebase';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import html2pdf from 'html2pdf.js';
 import MaterialConfigurator from './MaterialConfigurator';
 
 interface CustomerData {
@@ -71,6 +71,31 @@ interface OrderItem {
   frenchName?: string;
 }
 
+export interface DebtOrderItem {
+  materialName: string;
+  category?: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  settledAmount?: number;
+  unsettledAmount: number;
+}
+
+export interface DebtItem {
+  orderNo?: string;
+  dueDate: string;
+  amount: number;
+  totalAmount?: number;
+  settledAmount?: number;
+  businessDate?: string;
+  salesperson?: string;
+  customerName?: string;
+  customerCode?: string;
+  city?: string;
+  remarks?: string;
+  items?: DebtOrderItem[];
+}
+
 const COLOR_TRANSLATIONS: Record<string, string> = {
   '红色': 'Rouge',
   '蓝色': 'Bleu',
@@ -108,6 +133,46 @@ function getFrenchName(p: PriceItem | undefined): string {
   return p['物料代码'] || p['法语名'] || p['法语名称'] || p['法语'] || p['Désignation'] || p['Designation'] || p['Nom du produit'] || p['Description'] || p['物料名称'] || '';
 }
 
+const normalizeText = (s: string) => 
+  (s || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+
+const PRODUCT_ALIASES_FR: Record<string, string> = {
+  '扶手椅子-菱形钢管椅--90': 'CHAISE PIED METAL 01',
+  '扶手椅子/': 'CHAISE PIED METAL 01',
+  '菱格钢管椅': 'CHAISE PIED METAL 01',
+  '0.4升v型口杯': 'TASSE 0.4L V',
+  '0.4lv型口杯': 'TASSE 0.4L V',
+  '0.4升口杯': 'TASSE 0.4L',
+  '0.4l口杯': 'TASSE 0.4L',
+  '0.4升水杯': 'GOBLET 0.4L',
+  '0.4l水杯': 'GOBLET 0.4L',
+  '30l方耳盆': 'BASSINE 30L POIGNEE CARRE',
+  '30l圆耳盆': 'BASSINE POIGNEE CLAIR 30L RONDE',
+  '40l簿塑料盆': 'BASSINE CLAIR 40L LEGER',
+  '20l油壶': 'BIDON 20L',
+  '扁平果盘(大)': 'PANIER PLAT GRAND',
+  '扁平果盘(中)': 'PANIER PLAT MID',
+  '扁平果盘(小)': 'PANIER PLAT PETIT',
+  '套盆a/': 'BOL A',
+  '套盆a+b+c': 'BOL A+B+C',
+  '凳子/ 47高': 'TABOURET 47CM',
+  '不锈钢水塔 1000l': 'RÉSERVOIR INOX 1000L',
+  '不锈钢水塔 2000l': 'RÉSERVOIR INOX 2000L',
+  '过滤器 3pouce': 'FILTRE 3 POUCES',
+  '滴灌带 drip tape type 200': 'BANDE GOUTTE-À-GOUTTE TYPE 200'
+};
+
+function translateCategoryFr(cat: string | undefined): string {
+  if (!cat) return '-';
+  const c = cat.toLowerCase();
+  if (c.includes('小盆') || c.includes('盆') || c.includes('bassine') || c.includes('bol')) return 'Série Bassines';
+  if (c.includes('小桶') || c.includes('大桶') || c.includes('桶') || c.includes('seau')) return 'Série Seaux';
+  if (c.includes('壶') || c.includes('杯') || c.includes('satala') || c.includes('goblet') || c.includes('tasse') || c.includes('lampe') || c.includes('bidon') || c.includes('gourde')) return 'Série Bidons & Gourdes';
+  if (c.includes('椅') || c.includes('凳') || c.includes('chaise') || c.includes('tabouret')) return 'Série Chaises & Meubles';
+  if (c.includes('其他') || c.includes('autre')) return 'Autres articles';
+  return cat;
+}
+
 export default function CustomerPortal() {
   const [customer, setCustomer] = useState<CustomerData | null>(() => {
     try {
@@ -134,23 +199,60 @@ export default function CustomerPortal() {
   const [refreshingInventory, setRefreshingInventory] = useState(false);
   const [_loadingData, setLoadingData] = useState(true);
 
+  // Debts and customers data (matches sales credit & debts logic)
+  const [debts, setDebts] = useState<Record<string, DebtItem[]>>({});
+  const [allCustomers, setAllCustomers] = useState<CustomerData[]>([]);
+  const [_loadingDebts, setLoadingDebts] = useState(false);
+
+  // Helper to find a price item by code, name, or normalized equivalent
+  const findPriceItem = useCallback((item: any) => {
+    const code = item?.materialCode || '';
+    const name = item?.materialName || '';
+    const fr = item?.frenchName || '';
+    const normCode = normalizeText(code);
+    const normName = normalizeText(name);
+    const normFr = normalizeText(fr);
+
+    return prices.find((p: any) => {
+      const pName = normalizeText(p['物料名称']);
+      const pCode = normalizeText(p['物料代码']);
+      return (
+        (pName && (pName === normName || pName === normCode || pName === normFr)) ||
+        (pCode && (pCode === normCode || pCode === normName || pCode === normFr))
+      );
+    }) || prices.find((p: any) => {
+      const pName = normalizeText(p['物料名称']);
+      return pName && normName && (normName.includes(pName) || pName.includes(normName));
+    });
+  }, [prices]);
+
   // Translate product to French for display in orders & details
   const translateProduct = useCallback((item: any) => {
     if (item?.frenchName && !/[\u4e00-\u9fa5]/.test(item.frenchName)) {
       return item.frenchName;
     }
-    const priceItem = prices.find((p: any) => 
-      p['物料名称'] === item?.materialName || 
-      p['物料代码'] === item?.materialCode ||
-      p['物料代码'] === item?.materialName ||
-      p['物料名称'] === item?.materialCode
-    );
+    const name = item?.materialName || '';
+    const norm = normalizeText(name);
+    if (PRODUCT_ALIASES_FR[norm]) {
+      return PRODUCT_ALIASES_FR[norm];
+    }
+    const priceItem = findPriceItem(item);
     if (priceItem) {
       const fr = getFrenchName(priceItem);
       if (fr) return fr;
     }
+    // Fallback translation if name contains Chinese characters
+    if (/[\u4e00-\u9fa5]/.test(name)) {
+      if (name.includes('密胺餐盘')) return `ASSIETTE MÉLAMINE ${name.replace(/密胺餐盘/, '').trim()}`;
+      if (name.includes('盆')) return `BASSINE ${name.replace(/盆/, '').trim()}`.trim();
+      if (name.includes('桶')) return `SEAU ${name.replace(/桶/, '').trim()}`.trim();
+      if (name.includes('壶')) return `SATALAS / BIDON ${name.replace(/壶/, '').trim()}`.trim();
+      if (name.includes('杯')) return `GOBLET ${name.replace(/杯/, '').trim()}`.trim();
+      if (name.includes('椅')) return `CHAISE ${name.replace(/椅/, '').trim()}`.trim();
+      if (name.includes('凳')) return `TABOURET ${name.replace(/凳/, '').trim()}`.trim();
+    }
     return item?.frenchName || item?.materialCode || item?.materialName || '-';
-  }, [prices]);
+  }, [findPriceItem]);
 
   // Login form state
   const [account, setAccount] = useState('');
@@ -174,6 +276,9 @@ export default function CustomerPortal() {
   // Detail view message board reply state
   const [remarksInput, setRemarksInput] = useState('');
   const [isSavingRemarks, setIsSavingRemarks] = useState(false);
+
+  // Debt order modal view state (点击待到期欠款中的订单号查看订单详情)
+  const [viewingDebtOrder, setViewingDebtOrder] = useState<DebtItem | null>(null);
 
   // Category & search filter
   const [selectedCategory, setSelectedCategory] = useState<string>('盆系列');
@@ -214,19 +319,25 @@ export default function CustomerPortal() {
     setGeneratedOrderId('new order');
   }, []);
 
-  // Fetch prices & inventory
+  // Fetch prices, inventory, debts, and customer profiles
   const loadData = useCallback(async () => {
     try {
       setLoadingData(true);
-      const [pricesRes, invRes] = await Promise.all([
+      const [pricesRes, invRes, debtsRes, custsRes] = await Promise.all([
         fetch('/api/prices').then(r => r.json()).catch(() => []),
-        fetch('/api/inventory').then(r => r.json()).catch(() => ({ data: [] }))
+        fetch('/api/inventory').then(r => r.json()).catch(() => ({ data: [] })),
+        fetch('/api/debts').then(r => r.json()).catch(() => ({})),
+        fetch('/api/customers').then(r => r.json()).catch(() => [])
       ]);
       setPrices(Array.isArray(pricesRes) ? pricesRes : []);
       const invData = invRes.data || invRes;
       setInventory(Array.isArray(invData) ? invData : []);
       if (invRes.lastChanged) {
         setInventoryUpdateTime(invRes.lastChanged);
+      }
+      setDebts(debtsRes && typeof debtsRes === 'object' ? debtsRes : {});
+      if (Array.isArray(custsRes) && custsRes.length > 0) {
+        setAllCustomers(custsRes);
       }
     } catch (e) {
       console.error('Failed to load portal data:', e);
@@ -239,11 +350,113 @@ export default function CustomerPortal() {
     loadData();
   }, [loadData]);
 
-  // Manual refresh inventory
+  // Refresh customer debts and profile data
+  const refreshCustomerDebts = useCallback(async () => {
+    try {
+      setLoadingDebts(true);
+      const [debtsRes, custsRes] = await Promise.all([
+        fetch(`/api/debts?_t=${Date.now()}`).then(r => r.json()).catch(() => ({})),
+        fetch('/api/customers').then(r => r.json()).catch(() => [])
+      ]);
+      setDebts(debtsRes && typeof debtsRes === 'object' ? debtsRes : {});
+      if (Array.isArray(custsRes) && custsRes.length > 0) {
+        setAllCustomers(custsRes);
+      }
+    } catch (err) {
+      console.warn('Debts refresh error:', err);
+    } finally {
+      setLoadingDebts(false);
+    }
+  }, []);
+
+  // Helper functions for parsing and calculating customer credit & debts (identical to sales logic)
+  const parseDateForComparison = (dStr: string): string => {
+    if (!dStr) return '';
+    const parts = dStr.trim().split(/[/\-.]/);
+    if (parts.length === 3) {
+      let [y, m, d] = parts;
+      if (y.length === 2) y = '20' + y;
+      return `${y.padStart(4, '20')}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+    return dStr;
+  };
+
+  const checkIsOverdue = useCallback((dueDateStr: string): boolean => {
+    if (!dueDateStr) return false;
+    const normalized = parseDateForComparison(dueDateStr);
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    return normalized < todayStr;
+  }, []);
+
+  const getCustomerDebts = useCallback((targetCust: Partial<CustomerData> | null | undefined): DebtItem[] => {
+    if (!targetCust) return [];
+    const directCode = (targetCust['客户代码'] || '').trim();
+    if (directCode) {
+      if (debts[directCode]) return debts[directCode];
+      if (debts[directCode.toUpperCase()]) return debts[directCode.toUpperCase()];
+      if (debts[directCode.toLowerCase()]) return debts[directCode.toLowerCase()];
+    }
+    const custName = (targetCust['客户名'] || '').trim().toLowerCase();
+    if (custName) {
+      if (debts[custName]) return debts[custName];
+      const matched = allCustomers.find(c => (c['客户名'] || '').trim().toLowerCase() === custName);
+      const code = (matched?.['客户代码'] || '').trim();
+      if (code) {
+        if (debts[code]) return debts[code];
+        if (debts[code.toUpperCase()]) return debts[code.toUpperCase()];
+      }
+    }
+    return [];
+  }, [debts, allCustomers]);
+
+  const getCustomerCreditStats = useCallback((targetCust: Partial<CustomerData> | null | undefined) => {
+    if (!targetCust) {
+      return { totalCredit: 0, totalDebt: 0, remainingCredit: 0, custDebts: [] as DebtItem[], overdueTotal: 0, overdueDebts: [] as DebtItem[] };
+    }
+    const custDebts = getCustomerDebts(targetCust);
+    const totalDebt = custDebts.reduce((sum, d) => sum + (d.amount || 0), 0);
+    const overdueDebts = custDebts.filter(d => checkIsOverdue(d.dueDate));
+    const overdueTotal = overdueDebts.reduce((sum, d) => sum + (d.amount || 0), 0);
+
+    let rawCredit = String(targetCust['信用额度'] || '').replace(/,/g, '').trim();
+    if (!rawCredit) {
+      const custCode = (targetCust['客户代码'] || '').trim().toLowerCase();
+      const custName = (targetCust['客户名'] || '').trim().toLowerCase();
+      const matched = allCustomers.find(c => 
+        (custCode && (c['客户代码'] || '').trim().toLowerCase() === custCode) ||
+        (custName && (c['客户名'] || '').trim().toLowerCase() === custName)
+      );
+      if (matched) {
+        rawCredit = String(matched['信用额度'] || '').replace(/,/g, '').trim();
+      }
+    }
+    const totalCredit = parseFloat(rawCredit) || 0;
+    const remainingCredit = totalCredit - totalDebt;
+
+    return {
+      totalCredit,
+      totalDebt,
+      remainingCredit,
+      custDebts,
+      overdueTotal,
+      overdueDebts,
+    };
+  }, [getCustomerDebts, checkIsOverdue, allCustomers]);
+
+  // Real-time calculated credit & debt status for logged in customer
+  const customerCreditStats = useMemo(() => {
+    return getCustomerCreditStats(customer);
+  }, [customer, getCustomerCreditStats]);
+
+  // Manual refresh inventory and debts
   const refreshInventory = async () => {
     try {
       setRefreshingInventory(true);
-      const res = await fetch('/api/inventory');
+      const [res] = await Promise.all([
+        fetch('/api/inventory'),
+        refreshCustomerDebts()
+      ]);
       const json = await res.json();
       const invData = json.data || json;
       setInventory(Array.isArray(invData) ? invData : []);
@@ -278,6 +491,7 @@ export default function CustomerPortal() {
   const fetchCustomerOrders = useCallback(async () => {
     try {
       setLoadingOrders(true);
+      refreshCustomerDebts();
       const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'));
       const snap = await getDocs(q);
       const list: any[] = [];
@@ -812,102 +1026,219 @@ export default function CustomerPortal() {
     }
   };
 
-  // Download French Bon de Commande PDF
-  const downloadFrenchPDF = (order: any) => {
-    try {
-      const doc = new jsPDF();
-      
-      // Header
-      doc.setFontSize(20);
-      doc.setTextColor(30, 58, 138);
-      doc.text('TTP PLASTIQUE', 14, 20);
+  // PDF Export States (identical to Sales logic)
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfTargetOrder, setPdfTargetOrder] = useState<any | null>(null);
+  const orderExportRef = useRef<HTMLDivElement>(null);
+  const [mobilePdfModal, setMobilePdfModal] = useState<{
+    isOpen: boolean;
+    url: string;
+    filename: string;
+    blob: Blob | null;
+  }>({
+    isOpen: false,
+    url: '',
+    filename: '',
+    blob: null
+  });
 
-      doc.setFontSize(10);
-      doc.setTextColor(100, 116, 139);
-      doc.text('Zone Industrielle de Thiès - Sénégal', 14, 26);
-      doc.text('Tél : +221 77 000 00 00 | Email : contact@ttpplastique.com', 14, 31);
+  // Helper to convert a debt record into a full order structure compatible with PDF generation and viewing
+  const buildOrderFromDebt = useCallback((d: DebtItem): any => {
+    // 1. Lookup matching customer
+    const matchedCustomer = allCustomers.find(c => 
+      (d.customerCode && c['客户代码'] === d.customerCode) || 
+      (d.customerName && c['客户名'] === d.customerName)
+    ) || customer;
 
-      doc.setFontSize(16);
-      doc.setTextColor(15, 23, 42);
-      doc.text('BON DE COMMANDE', 140, 20);
-
-      doc.setFontSize(10);
-      doc.text(`N° Commande : ${order.id || '-'}`, 140, 27);
-      const dateFormatted = order.createdAt?.seconds 
-        ? new Date(order.createdAt.seconds * 1000).toLocaleDateString('fr-FR')
-        : new Date().toLocaleDateString('fr-FR');
-      doc.text(`Date : ${dateFormatted}`, 140, 32);
-
-      // Customer Details Box
-      doc.setFillColor(248, 250, 252);
-      doc.rect(14, 40, 182, 26, 'F');
-      doc.setDrawColor(226, 232, 240);
-      doc.rect(14, 40, 182, 26, 'S');
-
-      doc.setFontSize(11);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Client : ${order.customer?.['客户名'] || '-'}`, 18, 48);
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text(`Code Client : ${order.customer?.['客户代码'] || '-'}`, 18, 54);
-      doc.text(`Téléphone : ${order.customer?.['电话号码'] || '-'}`, 18, 60);
-
-      doc.text(`Commercial : ${order.customer?.['销售'] || order.salespersonName || '-'}`, 110, 48);
-      doc.text(`Région : ${order.customer?.['所在地区'] || '-'}`, 110, 54);
-      doc.text(`Statut : ${translateStatus(order.status)}`, 110, 60);
-
-      // Items Table
-      const tableRows = (order.items || []).map((it: any, index: number) => {
-        const designation = translateProduct(it);
-        const color = translateColor(it.color || 'Standard');
-        const qty = it.quantity || 0;
-        const pu = it.unitPrice || 0;
-        const total = it.totalPrice || (qty * pu);
-        return [
-          index + 1,
-          designation,
-          color,
-          qty.toLocaleString('fr-FR'),
-          `${pu.toLocaleString('fr-FR')} FCFA`,
-          `${total.toLocaleString('fr-FR')} FCFA`
-        ];
-      });
-
-      autoTable(doc, {
-        startY: 72,
-        head: [['#', 'Désignation Produit', 'Couleur', 'Quantité', 'Prix Unitaire', 'Total']],
-        body: tableRows,
-        theme: 'striped',
-        headStyles: { fillColor: [30, 58, 138], textColor: 255, fontStyle: 'bold' },
-        styles: { fontSize: 9, cellPadding: 3 },
-        columnStyles: {
-          0: { cellWidth: 10, halign: 'center' },
-          1: { cellWidth: 70 },
-          2: { cellWidth: 30 },
-          3: { cellWidth: 20, halign: 'right' },
-          4: { cellWidth: 25, halign: 'right' },
-          5: { cellWidth: 27, halign: 'right' },
+    // 2. If it already matches an order in allOrders, use that system order
+    const matched = allOrders.find(o => o.id === d.orderNo || (o._docId && o._docId === d.orderNo));
+    if (matched && matched.items && matched.items.length > 0) {
+      return {
+        ...matched,
+        customer: {
+          '客户名': matched.customer?.['客户名'] || d.customerName || matchedCustomer?.['客户名'] || customer?.['客户名'] || '',
+          '客户代码': matched.customer?.['客户代码'] || d.customerCode || matchedCustomer?.['客户代码'] || customer?.['客户代码'] || '',
+          '电话号码': matched.customer?.['电话号码'] || matchedCustomer?.['电话号码'] || customer?.['电话号码'] || '',
+          '所在地区': matched.customer?.['所在地区'] || d.city || matchedCustomer?.['所在地区'] || customer?.['所在地区'] || '',
+          '销售': matched.customer?.['销售'] || d.salesperson || matchedCustomer?.['销售'] || customer?.['销售'] || '',
+          '信用额度': matched.customer?.['信用额度'] || matchedCustomer?.['信用额度'] || customer?.['信用额度'] || ''
         }
-      });
-
-      const finalY = (doc as any).lastAutoTable.finalY + 8;
-      doc.setFontSize(11);
-      doc.setTextColor(15, 23, 42);
-      doc.setFont(undefined as any, 'bold');
-      doc.text(`Total Général : ${Math.round(order.totalAmount || 0).toLocaleString('fr-FR')} FCFA`, 196, finalY, { align: 'right' });
-
-      if (order.remarks) {
-        doc.setFontSize(9);
-        doc.setFont(undefined as any, 'normal');
-        doc.setTextColor(100, 116, 139);
-        doc.text(`Instructions / Remarques : ${order.remarks}`, 14, finalY + 10);
-      }
-
-      doc.save(`Bon_Commande_${order.id || 'TTP'}.pdf`);
-    } catch (e) {
-      console.error('PDF error:', e);
-      alert('Erreur lors du téléchargement du PDF');
+      };
     }
+
+    // 3. Otherwise synthesize an Order object matching the exact schema expected by downloadFrenchPDF / orderExportRef
+    const items = (d.items && d.items.length > 0) 
+      ? d.items.map((it, idx) => {
+          const priceData = findPriceItem(it);
+          const materialCode = priceData ? priceData['物料代码'] : (it.materialName || `ITEM-${idx + 1}`);
+          const frenchName = priceData ? getFrenchName(priceData) : translateProduct(it);
+          return {
+            id: `${materialCode}-${idx}`,
+            materialCode,
+            materialName: it.materialName,
+            frenchName: frenchName || it.materialName,
+            color: 'Standard',
+            quantity: Number(it.quantity) || 0,
+            unitPrice: Number(it.unitPrice) || 0,
+            totalPrice: Number(it.totalPrice) || ((Number(it.quantity) || 0) * (Number(it.unitPrice) || 0))
+          };
+        })
+      : [
+          {
+            id: `ITEM-1`,
+            materialCode: d.orderNo || 'COMMANDE',
+            materialName: `Bon de livraison #${d.orderNo}`,
+            frenchName: `Bon de livraison #${d.orderNo}`,
+            color: 'Standard',
+            quantity: 1,
+            unitPrice: d.totalAmount || d.amount,
+            totalPrice: d.totalAmount || d.amount
+          }
+        ];
+
+    const parsedDate = d.businessDate ? new Date(d.businessDate.replace(/\//g, '-')) : new Date();
+    const effectiveTotal = d.totalAmount || d.amount || items.reduce((sum, it) => sum + it.totalPrice, 0);
+
+    return {
+      _docId: d.orderNo || `DEBT-${Date.now()}`,
+      id: d.orderNo || 'COMMANDE',
+      status: checkIsOverdue(d.dueDate) ? 'Échu' : 'Livré',
+      businessDate: d.businessDate || d.dueDate,
+      createdAt: {
+        toDate: () => (!isNaN(parsedDate.getTime()) ? parsedDate : new Date()),
+        seconds: Math.floor((!isNaN(parsedDate.getTime()) ? parsedDate.getTime() : Date.now()) / 1000)
+      },
+      customer: {
+        '客户名': d.customerName || matchedCustomer?.['客户名'] || customer?.['客户名'] || '',
+        '客户代码': d.customerCode || matchedCustomer?.['客户代码'] || customer?.['客户代码'] || '',
+        '电话号码': matchedCustomer?.['电话号码'] || customer?.['电话号码'] || '',
+        '所在地区': d.city || matchedCustomer?.['所在地区'] || customer?.['所在地区'] || '',
+        '销售': d.salesperson || matchedCustomer?.['销售'] || customer?.['销售'] || '',
+        '信用额度': matchedCustomer?.['信用额度'] || customer?.['信用额度'] || ''
+      },
+      items,
+      totalAmount: effectiveTotal,
+      remarks: d.remarks || '',
+      salespersonName: d.salesperson || matchedCustomer?.['销售'] || customer?.['销售'] || ''
+    };
+  }, [allOrders, prices, allCustomers, customer, findPriceItem, translateProduct]);
+
+  // Active order for PDF export template
+  const activePdfOrder = pdfTargetOrder || viewingOrder || (customerOrders.length > 0 ? customerOrders[0] : null);
+
+  // Download French Bon de Commande PDF using sales logic (html2pdf with images, categories, and mobile sharing)
+  const downloadFrenchPDF = (orderToExport: any) => {
+    const targetOrder = orderToExport || viewingOrder;
+    if (!targetOrder) return;
+
+    setPdfTargetOrder(targetOrder);
+    setGeneratingPdf(true);
+
+    setTimeout(async () => {
+      if (!orderExportRef.current) {
+        setGeneratingPdf(false);
+        setPdfTargetOrder(null);
+        return;
+      }
+      const element = orderExportRef.current;
+
+      // Temporarily bring element into layout flow for html2pdf container cloning and dimension calculation
+      const originalDisplay = element.style.display;
+      const originalPosition = element.style.position;
+      const originalLeft = element.style.left;
+      const originalTop = element.style.top;
+
+      element.style.display = 'block';
+      element.style.position = 'static';
+      element.style.left = '0';
+      element.style.top = '0';
+
+      try {
+        // Ensure layout and images have settled before cloning into html2pdf worker
+        await new Promise(r => setTimeout(r, 250));
+
+        const customerName = targetOrder.customer?.['客户名'] || customer?.['客户名'] || 'Client';
+        const totalAmount = targetOrder.items?.reduce((sum: number, item: any) => sum + (item.totalPrice || 0), 0) || targetOrder.totalAmount || 0;
+        const filename = `${customerName}_${Math.round(totalAmount)}.pdf`;
+
+        const opt = {
+          margin:       [10, 5, 10, 5] as [number, number, number, number],
+          filename:     filename,
+          image:        { type: 'jpeg' as const, quality: 0.98 },
+          html2canvas:  { 
+            scale: 2, 
+            useCORS: true,
+            allowTaint: true,
+            letterRendering: true,
+            logging: false,
+            scrollY: 0,
+            scrollX: 0
+          },
+          jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' as const },
+          pagebreak:    { mode: ['css', 'legacy'], avoid: ['tr', 'h1', 'h2', 'h3'] }
+        };
+
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        const restoreElement = () => {
+          element.style.display = originalDisplay;
+          element.style.position = originalPosition;
+          element.style.left = originalLeft;
+          element.style.top = originalTop;
+          setGeneratingPdf(false);
+          setPdfTargetOrder(null);
+        };
+
+        if (isMobile) {
+          html2pdf().set(opt).from(element).output('blob').then(async (pdfBlob: Blob) => {
+            restoreElement();
+
+            const url = URL.createObjectURL(pdfBlob);
+            setMobilePdfModal({
+              isOpen: true,
+              url,
+              filename,
+              blob: pdfBlob
+            });
+
+            // Try direct native share
+            const file = new File([pdfBlob], filename, { type: 'application/pdf' });
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+              try {
+                await navigator.share({
+                  files: [file],
+                  title: filename,
+                  text: `Bon de commande PDF - ${customerName}`
+                });
+              } catch (shareErr) {
+                console.log('Mobile share dismissed', shareErr);
+              }
+            }
+          }).catch((err: any) => {
+            console.error('Mobile PDF Blob Generation Error:', err);
+            restoreElement();
+            alert('Échec de la génération du PDF');
+          });
+        } else {
+          // Desktop - Use standard save
+          html2pdf().set(opt).from(element).save().then(() => {
+            restoreElement();
+          }).catch((err: any) => {
+            console.error('PDF Generation Error:', err);
+            restoreElement();
+            alert('Échec de la génération du PDF');
+          });
+        }
+      } catch (err) {
+        console.error('PDF Generation Setup Error:', err);
+        element.style.display = originalDisplay;
+        element.style.position = originalPosition;
+        element.style.left = originalLeft;
+        element.style.top = originalTop;
+        setGeneratingPdf(false);
+        alert('Échec de la génération du PDF');
+      }
+    }, 200);
   };
 
   // -------------------------------------------------------------
@@ -1029,6 +1360,7 @@ export default function CustomerPortal() {
               setActiveTab('order');
               setViewingOrder(null);
               setErrorMsg('');
+              refreshCustomerDebts();
             }}
             className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
               activeTab === 'order'
@@ -1130,7 +1462,7 @@ export default function CustomerPortal() {
                 >
                   {step === 1 
                     ? '① Sélection des Produits' 
-                    : '② Vérification & Validation'}
+                    : '② Résumé & Confirmation'}
                 </div>
               ))}
             </div>
@@ -1142,6 +1474,171 @@ export default function CustomerPortal() {
                 <span>{errorMsg}</span>
               </div>
             )}
+
+            {/* Situation Financière & Crédit Client */}
+            <div 
+              style={{ width: '100%', maxWidth: '1000px' }}
+              className={`p-4 sm:p-5 rounded-2xl border mb-5 shadow-xs transition-all ${
+                customerCreditStats.overdueTotal > 0
+                  ? 'bg-red-50/70 border-red-200'
+                  : customerCreditStats.remainingCredit < 0
+                  ? 'bg-amber-50/70 border-amber-200'
+                  : 'bg-white border-gray-200'
+              }`}
+            >
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between pb-3 border-b border-gray-200/70 gap-3">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2.5 rounded-xl flex items-center justify-center shrink-0 ${
+                    customerCreditStats.overdueTotal > 0
+                      ? 'bg-red-100 text-red-600'
+                      : customerCreditStats.remainingCredit < 0
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-blue-50 text-blue-600'
+                  }`}>
+                    <CreditCard className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-bold text-gray-900 text-base">
+                        Situation Financière & Impayés Client
+                      </h3>
+                      {customerCreditStats.overdueTotal > 0 && (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-red-600 text-white animate-pulse">
+                          ⚠️ {customerCreditStats.overdueDebts.length} échéance(s) échue(s)
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Suivi officiel de votre encours de crédit commercial et des échéances de règlement.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Financial KPI Badges */}
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <div className="bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-2xs">
+                    <span className="text-gray-500 block text-[11px]">Crédit Total</span>
+                    <span className="font-bold font-mono text-blue-700 text-sm">
+                      CFA {Math.round(customerCreditStats.totalCredit).toLocaleString('fr-FR')}
+                    </span>
+                  </div>
+
+                  <div className={`px-3 py-1.5 rounded-xl border shadow-2xs ${
+                    customerCreditStats.remainingCredit < 0 
+                      ? 'bg-red-100 border-red-300 text-red-900' 
+                      : 'bg-white border-gray-200'
+                  }`}>
+                    <span className="text-gray-500 block text-[11px]">Crédit Restant</span>
+                    <span className={`font-bold font-mono text-sm ${
+                      customerCreditStats.remainingCredit < 0 ? 'text-red-700 font-extrabold' : 'text-emerald-700'
+                    }`}>
+                      CFA {Math.round(customerCreditStats.remainingCredit).toLocaleString('fr-FR')}
+                      {customerCreditStats.remainingCredit < 0 && (
+                        <span className="ml-1 text-[10px] font-extrabold uppercase text-red-600">(Dépassement)</span>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-2xs">
+                    <span className="text-gray-500 block text-[11px]">Total Dû / Impayés</span>
+                    <span className="font-bold font-mono text-red-600 text-sm">
+                      CFA {Math.round(customerCreditStats.totalDebt).toLocaleString('fr-FR')}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Overdue Warning Alert if any */}
+              {customerCreditStats.overdueTotal > 0 && (
+                <div className="mt-3 p-3 bg-red-100/90 border border-red-300 rounded-xl text-xs text-red-900 flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2 font-bold">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                    <span>Attention : Vous avez des factures arrivées à échéance non réglées !</span>
+                  </div>
+                  <div className="font-bold font-mono text-sm text-red-800">
+                    Total Échu : CFA {Math.round(customerCreditStats.overdueTotal).toLocaleString('fr-FR')} ({customerCreditStats.overdueDebts.length} facture(s) en retard)
+                  </div>
+                </div>
+              )}
+
+              {/* Debts breakdown list */}
+              {customerCreditStats.custDebts.length > 0 ? (
+                <div className="mt-3">
+                  <div className="text-xs font-semibold text-gray-700 mb-2 flex items-center justify-between">
+                    <span>Détail des échéances en attente ({customerCreditStats.custDebts.length}) :</span>
+                    <span className="text-[11px] text-gray-500 font-normal">Classées par date d'échéance</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-56 overflow-y-auto pr-1">
+                    {customerCreditStats.custDebts.map((d, dIdx) => {
+                      const isOd = checkIsOverdue(d.dueDate);
+                      return (
+                        <div 
+                          key={dIdx} 
+                          className={`flex flex-col sm:flex-row sm:items-center justify-between p-2.5 rounded-lg text-xs font-mono border transition-all ${
+                            isOd 
+                              ? 'bg-red-50/80 border-red-200 text-red-900 shadow-2xs' 
+                              : 'bg-white border-gray-200 text-gray-800 shadow-2xs hover:border-gray-300'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                            <span className={`w-2 h-2 rounded-full shrink-0 ${isOd ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`} />
+                            {d.orderNo ? (
+                              <button
+                                type="button"
+                                disabled={generatingPdf && pdfTargetOrder?.id === d.orderNo}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const orderObj = buildOrderFromDebt(d);
+                                  downloadFrenchPDF(orderObj);
+                                }}
+                                className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 hover:text-blue-900 font-bold rounded-lg border border-blue-200 hover:border-blue-300 transition-all flex items-center gap-1.5 cursor-pointer text-xs group shadow-2xs disabled:opacity-50"
+                                title="Cliquer pour télécharger directement le Bon de Commande (PDF)"
+                              >
+                                {generatingPdf && pdfTargetOrder?.id === d.orderNo ? (
+                                  <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-600 border-t-transparent shrink-0" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5 text-blue-600 group-hover:text-blue-800 shrink-0" />
+                                )}
+                                <span className="underline decoration-blue-300 group-hover:decoration-blue-700 font-mono">#{d.orderNo}</span>
+                                <span className="text-[10px] bg-blue-200/80 text-blue-800 px-1 py-0.2 rounded font-semibold">PDF</span>
+                              </button>
+                            ) : null}
+                            <span className="whitespace-nowrap text-xs">
+                              Échéance : <strong>{d.dueDate}</strong>
+                            </span>
+                            {isOd && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-red-200 text-red-800 font-bold uppercase shrink-0">
+                                ÉCHU
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between sm:justify-end gap-2 mt-1 sm:mt-0">
+                            <span className={`font-bold shrink-0 whitespace-nowrap text-xs ${isOd ? 'text-red-700' : 'text-gray-900'}`}>
+                              CFA {Math.round(d.amount).toLocaleString('fr-FR')}
+                            </span>
+                            {d.orderNo && (
+                              <button
+                                type="button"
+                                onClick={() => setViewingDebtOrder(d)}
+                                className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                                title="Voir les détails de la commande à l'écran"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 py-2.5 px-3 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Félicitations ! Aucun impayé en cours. Votre compte est parfaitement à jour.</span>
+                </div>
+              )}
+            </div>
 
             {/* STEP 1: MATERIAL SELECTION & QUANTITY CONFIGURATION */}
             {currentStep === 1 && (
@@ -1276,23 +1773,67 @@ export default function CustomerPortal() {
                         setCurrentStep(2);
                       }}
                     >
-                      Suivant : Aperçu de la commande <ChevronRight className="w-4 h-4 ml-2" />
+                      Suivant : Résumé de la commande <ChevronRight className="w-4 h-4 ml-2" />
                     </button>
                   </div>
                 </div>
               </section>
             )}
 
-            {/* STEP 2: ORDER PREVIEW & SAVE */}
+            {/* STEP 2: ORDER SUMMARY & VALIDATION */}
             {currentStep === 2 && (
               <section className="theme-section" style={{ width: '100%', maxWidth: '750px', flexGrow: 1, overflow: 'visible' }}>
                 <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>② Aperçu & Confirmation de la commande</span>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>② Résumé & Confirmation de la commande</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 'normal' }}>N° Commande :</span>
-                    <span className="font-mono font-bold text-blue-600 text-sm px-2 py-0.5 bg-blue-50 border border-blue-200 rounded">
-                      {generatedOrderId}
-                    </span>
+                    <button
+                      type="button"
+                      disabled={generatingPdf || orderItems.length === 0}
+                      onClick={() => {
+                        const draftOrder = {
+                          _docId: generatedOrderId,
+                          id: generatedOrderId,
+                          status: 'Brouillon',
+                          businessDate: new Date().toLocaleDateString('fr-FR'),
+                          createdAt: {
+                            toDate: () => new Date(),
+                            seconds: Math.floor(Date.now() / 1000)
+                          },
+                          customer: {
+                            '客户名': customer['客户名'] || '',
+                            '客户代码': customer['客户代码'] || '',
+                            '电话号码': customer['电话号码'] || '',
+                            '所在地区': customer['所在地区'] || '',
+                            '销售': customer['销售'] || '',
+                            '信用额度': customer['信用额度'] || ''
+                          },
+                          items: orderItems.map((it, idx) => ({
+                            id: `${it.materialCode}-${idx}`,
+                            materialCode: it.materialCode,
+                            materialName: it.materialName,
+                            frenchName: it.frenchName || translateProduct(it),
+                            color: it.color,
+                            quantity: Number(it.quantity) || 0,
+                            unitPrice: Number(it.unitPrice) || 0,
+                            totalPrice: Number(it.totalPrice) || ((Number(it.quantity) || 0) * (Number(it.unitPrice) || 0))
+                          })),
+                          totalAmount: totalAmount,
+                          remarks: customerRemarks
+                        };
+                        downloadFrenchPDF(draftOrder);
+                      }}
+                      className="font-mono font-bold text-blue-600 hover:text-blue-800 text-sm px-2.5 py-1 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded flex items-center gap-1.5 cursor-pointer shadow-2xs transition-all disabled:opacity-50"
+                      title="Cliquer pour télécharger directement le Bon de Commande (PDF)"
+                    >
+                      {generatingPdf && pdfTargetOrder?.id === generatedOrderId ? (
+                        <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-blue-600 border-t-transparent" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5 text-blue-600" />
+                      )}
+                      <span className="underline decoration-blue-300">#{generatedOrderId}</span>
+                      <span className="text-[10px] bg-blue-200/90 text-blue-800 px-1 py-0.2 rounded font-sans font-semibold">PDF</span>
+                    </button>
                   </div>
                 </div>
                 <div style={{ padding: '16px', paddingBottom: '160px', display: 'flex', flexDirection: 'column', gap: '16px', overflow: 'visible' }}>
@@ -1487,7 +2028,20 @@ export default function CustomerPortal() {
                     >
                       <ArrowLeft className="w-5 h-5" />
                     </button>
-                    <h2 className="text-xl font-bold text-gray-800 font-mono">#{viewingOrder.id}</h2>
+                    <button
+                      type="button"
+                      disabled={generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId}
+                      onClick={() => downloadFrenchPDF(viewingOrder)}
+                      className="text-xl font-bold text-blue-600 hover:text-blue-800 hover:underline font-mono cursor-pointer flex items-center gap-1.5 disabled:opacity-50 text-left"
+                      title="Cliquer pour télécharger directement le Bon de Commande (PDF)"
+                    >
+                      <span>#{viewingOrder.id}</span>
+                      {generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-600 border-t-transparent" />
+                      ) : (
+                        <Download className="w-4 h-4 text-blue-500" />
+                      )}
+                    </button>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <span className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase border ${
@@ -1512,10 +2066,15 @@ export default function CustomerPortal() {
                   <div className="flex items-center gap-2 ml-0 sm:ml-auto">
                     <button
                       onClick={() => downloadFrenchPDF(viewingOrder)}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center gap-2 cursor-pointer"
+                      disabled={generatingPdf}
+                      className={`px-4 py-2 ${generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId ? 'bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-lg text-xs font-bold transition-all shadow-sm flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed`}
                     >
-                      <Download className="w-4 h-4" />
-                      <span>Télécharger Bon de Commande (PDF)</span>
+                      {generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
+                      <span>{generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId ? 'Génération...' : 'Télécharger Bon de Commande (PDF)'}</span>
                     </button>
                   </div>
                 </div>
@@ -1570,33 +2129,32 @@ export default function CustomerPortal() {
                 <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm mb-6 print:shadow-none print:border-gray-300">
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="font-bold text-gray-800">
-                      客户信息 <span className="text-gray-400 font-normal text-xs ml-2 print:inline">/ Informations Client</span>
+                      Informations Client
                     </h3>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                     <div>
-                      <span className="text-gray-500 block mb-1">名称 <span className="text-gray-400 text-xs">/ Nom</span></span>
+                      <span className="text-gray-500 block mb-1">Nom du client</span>
                       <span className="font-medium text-gray-900">{viewingOrder.customer?.['客户名'] || customer?.['客户名']}</span>
                     </div>
                     <div>
-                      <span className="text-gray-500 block mb-1">代码 <span className="text-gray-400 text-xs">/ Code</span></span>
+                      <span className="text-gray-500 block mb-1">Code client</span>
                       <span className="font-medium font-mono">{viewingOrder.customer?.['客户代码'] || customer?.['客户代码'] || '-'}</span>
                     </div>
-                    {/* 优化项1：除了隐藏客户信息中的级别，其他和销售生成的界面一模一样 */}
                     <div>
-                      <span className="text-gray-500 block mb-1">电话 <span className="text-gray-400 text-xs">/ Tél</span></span>
+                      <span className="text-gray-500 block mb-1">Téléphone</span>
                       <span className="font-medium">{viewingOrder.customer?.['电话号码'] || customer?.['电话号码'] || '-'}</span>
                     </div>
                     <div>
-                      <span className="text-gray-500 block mb-1">销售 <span className="text-gray-400 text-xs">/ Vendeur</span></span>
+                      <span className="text-gray-500 block mb-1">Commercial assigné</span>
                       <span className="font-medium">{viewingOrder.customer?.['销售'] || viewingOrder.salespersonName || customer?.['销售'] || '-'}</span>
                     </div>
                     <div>
-                      <span className="text-gray-500 block mb-1">地区 <span className="text-gray-400 text-xs">/ Région</span></span>
+                      <span className="text-gray-500 block mb-1">Région</span>
                       <span className="font-medium">{viewingOrder.customer?.['所在地区'] || customer?.['所在地区'] || '-'}</span>
                     </div>
                     <div>
-                      <span className="text-gray-500 block mb-1">创建时间 <span className="text-gray-400 text-xs">/ Date</span></span>
+                      <span className="text-gray-500 block mb-1">Date de commande</span>
                       <span className="font-medium">
                         {viewingOrder.createdAt?.seconds 
                           ? new Date(viewingOrder.createdAt.seconds * 1000).toLocaleString('fr-FR', {
@@ -1605,32 +2163,114 @@ export default function CustomerPortal() {
                           : (viewingOrder.createdAt?.toDate ? viewingOrder.createdAt.toDate().toLocaleString('fr-FR') : '-')}
                       </span>
                     </div>
+                    <div>
+                      <span className="text-gray-500 block mb-1">Plafond de crédit</span>
+                      <span className="font-medium font-mono text-blue-700">
+                        CFA {Math.round(getCustomerCreditStats(viewingOrder.customer || customer).totalCredit).toLocaleString('fr-FR')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500 block mb-1">Crédit Restant</span>
+                      <span className={`font-medium font-mono ${getCustomerCreditStats(viewingOrder.customer || customer).remainingCredit < 0 ? 'text-red-600 font-bold' : 'text-green-700'}`}>
+                        CFA {Math.round(getCustomerCreditStats(viewingOrder.customer || customer).remainingCredit).toLocaleString('fr-FR')}
+                        {getCustomerCreditStats(viewingOrder.customer || customer).remainingCredit < 0 ? ' (Dépassement de plafond)' : ''}
+                      </span>
+                    </div>
                     <div className="col-span-2 md:col-span-4 border-t border-gray-100 pt-3">
-                      <span className="text-gray-500 block mb-1">备注 <span className="text-gray-400 text-xs">/ Note</span></span>
+                      <span className="text-gray-500 block mb-1">Notes & Remarques client</span>
                       <div className="font-medium text-gray-900 break-words block">
                         {viewingOrder.customer?.['备注'] || '-'}
                       </div>
                     </div>
                   </div>
+
+                  {/* Situation crédit & impayés client */}
+                  {(() => {
+                    const stats = getCustomerCreditStats(viewingOrder.customer || customer);
+                    const { totalCredit, totalDebt, remainingCredit, custDebts, overdueDebts, overdueTotal } = stats;
+                    if (custDebts.length === 0 && totalCredit === 0) return null;
+
+                    return (
+                      <div className="mt-4 p-3.5 bg-red-50/80 border border-red-200 rounded-lg text-xs">
+                        <div className="flex flex-wrap items-center justify-between font-bold text-red-800 mb-2 gap-2">
+                          <span className="flex items-center gap-1.5 text-sm">
+                            <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
+                            <span>Situation crédit & impayés client</span>
+                          </span>
+                          <div className="flex items-center gap-2 flex-wrap text-xs">
+                            <span className="font-bold text-blue-900 bg-white px-2 py-0.5 rounded border border-blue-200">
+                              Crédit Total : <span className="text-blue-700">CFA {Math.round(totalCredit).toLocaleString('fr-FR')}</span>
+                            </span>
+                            <span className={`font-bold px-2 py-0.5 rounded border ${remainingCredit < 0 ? 'bg-red-100 border-red-300 text-red-800' : 'bg-white border-green-200 text-green-800'}`}>
+                              Crédit Restant : <span>CFA {Math.round(remainingCredit).toLocaleString('fr-FR')}</span>
+                            </span>
+                            <span className="font-bold text-gray-900 bg-white px-2 py-0.5 rounded border border-red-100">
+                              Total Dû : <span className="text-red-700">CFA {Math.round(totalDebt).toLocaleString('fr-FR')}</span>
+                            </span>
+                          </div>
+                        </div>
+                        {overdueTotal > 0 && (
+                          <div className="text-red-700 font-semibold mb-2 bg-red-100/80 p-2 rounded border border-red-200 flex items-center justify-between">
+                            <span>⚠️ Dont impayés échus :</span>
+                            <span className="font-bold text-red-800 text-sm">CFA {Math.round(overdueTotal).toLocaleString('fr-FR')} ({overdueDebts.length} échéance(s) en retard)</span>
+                          </div>
+                        )}
+                        {custDebts.length > 0 && (
+                          <div className="space-y-1 max-h-36 overflow-y-auto bg-white p-2 rounded border border-red-100 font-mono text-xs">
+                            {custDebts.map((d, dIdx) => {
+                              const isOd = checkIsOverdue(d.dueDate);
+                              return (
+                                <div key={dIdx} className={`flex justify-between items-center py-1 px-1.5 rounded ${isOd ? 'bg-red-50/70 text-red-700 font-bold' : 'text-gray-700 border-b border-gray-50 last:border-0'}`}>
+                                  <div className="flex items-center gap-1.5">
+                                    {d.orderNo && (
+                                      <button
+                                        type="button"
+                                        disabled={generatingPdf && pdfTargetOrder?.id === d.orderNo}
+                                        onClick={() => {
+                                          const orderObj = buildOrderFromDebt(d);
+                                          downloadFrenchPDF(orderObj);
+                                        }}
+                                        className="text-blue-600 hover:text-blue-800 hover:underline font-bold cursor-pointer inline-flex items-center gap-1 text-xs"
+                                        title="Télécharger Bon de Commande (PDF)"
+                                      >
+                                        {generatingPdf && pdfTargetOrder?.id === d.orderNo ? (
+                                          <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-600 border-t-transparent" />
+                                        ) : (
+                                          <Download className="w-3 h-3 text-blue-500" />
+                                        )}
+                                        <span>#{d.orderNo} (PDF)</span>
+                                      </button>
+                                    )}
+                                    <span>{d.dueDate} {isOd ? '(ÉCHU)' : ''}</span>
+                                  </div>
+                                  <span>CFA {Math.round(d.amount).toLocaleString('fr-FR')}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
-                {/* 留言板 / Message Board - Identical to sales view */}
+                {/* Espace d'échange / Remarques */}
                 <div className="bg-white rounded-xl border border-gray-200 shadow-sm mb-6 print:shadow-none print:border-gray-300 overflow-hidden flex flex-col">
                   <div className="flex justify-between items-center p-4 border-b bg-gray-50 flex-shrink-0">
                     <h3 className="font-bold text-gray-800">
-                      留言板 <span className="text-gray-400 font-normal text-xs ml-2 print:inline">/ Message Board</span>
+                      Espace d'échange & Remarques
                     </h3>
                   </div>
                   
                   <div className="p-4 text-sm text-gray-700 whitespace-pre-wrap flex-grow space-y-2" style={{minHeight: '100px'}}>
                     {!viewingOrder.remarks ? (
-                      <span className="text-gray-400 italic">暂无留言 / Aucun message</span>
+                      <span className="text-gray-400 italic">Aucun message pour le moment</span>
                     ) : (
                       (() => {
                         const allLines = (viewingOrder.remarks || '').split('\n');
                         const filteredLines = allLines.filter((l: string) => l.trim().length > 0);
                         if (filteredLines.length === 0) {
-                          return <span className="text-gray-400 italic">暂无留言 / Aucun message</span>;
+                          return <span className="text-gray-400 italic">Aucun message pour le moment</span>;
                         }
                         return filteredLines.map((line: string, i: number) => {
                           const sysLogMatch = line.match(/^\[(系统日志|Log Système)\s([0-9/: \-]+)\s([^\]]+)\]:(.*)/);
@@ -1694,24 +2334,24 @@ export default function CustomerPortal() {
                   </div>
                 </div>
 
-                {/* 订单明细 / Détails de la Commande - Identical to sales view with French names */}
+                {/* Détails de la Commande */}
                 <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden print:shadow-none print:border-gray-300 mb-6">
                   <div className="p-6 border-b border-gray-200 print:p-4">
                     <h3 className="font-bold text-gray-800">
-                      订单明细 <span className="text-gray-400 font-normal text-xs ml-2 print:inline">/ Détails de la Commande</span>
+                      Détails de la Commande
                     </h3>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
                       <thead className="bg-gray-50 text-gray-600 border-b border-gray-200">
                         <tr>
-                          <th className="px-6 py-3 font-medium">物料名称 <span className="text-gray-400 text-xs">/ Produit</span></th>
-                          <th className="px-6 py-3 font-medium">颜色 <span className="text-gray-400 text-xs">/ Couleur</span></th>
-                          <th className="px-6 py-3 font-medium">物料编码 <span className="text-gray-400 text-xs">/ Code</span></th>
-                          <th className="px-6 py-3 font-medium">规格型号 <span className="text-gray-400 text-xs">/ Spécification</span></th>
-                          <th className="px-6 py-3 font-medium text-right">数量 <span className="text-gray-400 text-xs">/ Quantité</span></th>
-                          <th className="px-6 py-3 font-medium text-right">单价 (CFA) <span className="text-gray-400 text-xs">/ Prix</span></th>
-                          <th className="px-6 py-3 font-medium text-right">小计 (CFA) <span className="text-gray-400 text-xs">/ Sous-total</span></th>
+                          <th className="px-6 py-3 font-medium">Produit / Désignation</th>
+                          <th className="px-6 py-3 font-medium">Couleur</th>
+                          <th className="px-6 py-3 font-medium">Code Produit</th>
+                          <th className="px-6 py-3 font-medium">Spécification</th>
+                          <th className="px-6 py-3 font-medium text-right">Quantité</th>
+                          <th className="px-6 py-3 font-medium text-right">Prix Unitaire (CFA)</th>
+                          <th className="px-6 py-3 font-medium text-right">Sous-total (CFA)</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -1734,11 +2374,11 @@ export default function CustomerPortal() {
                           );
                         })}
                         <tr className="bg-gray-50 border-t border-gray-200">
-                          <td colSpan={4} className="px-6 py-4 text-right font-bold text-gray-700">总计 <span className="text-gray-400 text-xs">/ Total:</span></td>
+                          <td colSpan={4} className="px-6 py-4 text-right font-bold text-gray-700">Quantité Totale :</td>
                           <td className="px-6 py-4 text-right font-bold text-gray-900 text-lg">
                             {(viewingOrder.items || []).reduce((sum: number, it: any) => sum + (Number(it.quantity) || 0), 0).toLocaleString('fr-FR')}
                           </td>
-                          <td className="px-6 py-4 text-right font-bold text-gray-700">总金额 <span className="text-gray-400 text-xs">/ Total Montant:</span></td>
+                          <td className="px-6 py-4 text-right font-bold text-gray-700">Montant Total :</td>
                           <td className="px-6 py-4 text-right font-bold text-blue-600 text-lg font-mono">
                             CFA {Math.round(viewingOrder.totalAmount || 0).toLocaleString('fr-FR')}
                           </td>
@@ -1976,10 +2616,22 @@ export default function CustomerPortal() {
                             return (
                               <tr key={order._docId} className={rowClass}>
                                 <td 
-                                  className="px-6 py-4 font-medium text-blue-600 cursor-pointer hover:underline font-mono"
-                                  onClick={() => setViewingOrder(order)}
+                                  className="px-6 py-4 font-medium text-blue-600 cursor-pointer hover:text-blue-800 font-mono"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    downloadFrenchPDF(order);
+                                  }}
+                                  title="Cliquer pour télécharger directement le Bon de Commande (PDF)"
                                 >
-                                  {order.id}
+                                  <div className="flex items-center gap-1.5 group">
+                                    {generatingPdf && pdfTargetOrder?._docId === order._docId ? (
+                                      <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-blue-600 border-t-transparent shrink-0" />
+                                    ) : (
+                                      <Download className="w-3.5 h-3.5 text-blue-500 group-hover:text-blue-700 shrink-0" />
+                                    )}
+                                    <span className="underline group-hover:decoration-blue-700 font-bold">{order.id}</span>
+                                    <span className="text-[10px] bg-blue-100 text-blue-700 px-1 py-0.2 rounded font-sans font-semibold">PDF</span>
+                                  </div>
                                 </td>
                                 <td className="px-6 py-4 text-gray-600">
                                   {order.customer?.['销售'] || order.salespersonName || '-'}
@@ -2021,10 +2673,15 @@ export default function CustomerPortal() {
                                     </button>
                                     <button
                                       onClick={() => downloadFrenchPDF(order)}
-                                      className="text-gray-600 hover:text-gray-900 px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded transition-colors cursor-pointer text-xs flex items-center gap-1"
+                                      disabled={generatingPdf}
+                                      className="text-gray-600 hover:text-gray-900 px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded transition-colors cursor-pointer text-xs flex items-center gap-1 disabled:opacity-50"
                                       title="Télécharger Bon de Commande (PDF)"
                                     >
-                                      <Download className="w-3.5 h-3.5" />
+                                      {generatingPdf && pdfTargetOrder?._docId === order._docId ? (
+                                        <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-current border-t-transparent" />
+                                      ) : (
+                                        <Download className="w-3.5 h-3.5" />
+                                      )}
                                       <span>PDF</span>
                                     </button>
                                   </div>
@@ -2056,7 +2713,23 @@ export default function CustomerPortal() {
                           >
                             <div className="flex justify-between items-start mb-2">
                               <div className="flex items-center gap-2">
-                                <span className="text-sm font-bold text-blue-600 font-mono">#{order.id}</span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    downloadFrenchPDF(order);
+                                  }}
+                                  className="flex items-center gap-1 text-sm font-bold text-blue-600 font-mono hover:underline cursor-pointer group"
+                                  title="Cliquer pour télécharger directement le Bon de Commande (PDF)"
+                                >
+                                  {generatingPdf && pdfTargetOrder?._docId === order._docId ? (
+                                    <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-blue-600 border-t-transparent shrink-0" />
+                                  ) : (
+                                    <Download className="w-3.5 h-3.5 text-blue-500 group-hover:text-blue-700 shrink-0" />
+                                  )}
+                                  <span>#{order.id}</span>
+                                  <span className="text-[10px] bg-blue-100 text-blue-700 px-1 py-0.2 rounded font-sans font-semibold">PDF</span>
+                                </button>
                                 {order.isPriority && <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />}
                               </div>
                               <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
@@ -2093,10 +2766,15 @@ export default function CustomerPortal() {
                                 </button>
                                 <button
                                   onClick={() => downloadFrenchPDF(order)}
-                                  className="p-1.5 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer"
+                                  disabled={generatingPdf}
+                                  className="p-1.5 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer disabled:opacity-50"
                                   title="PDF"
                                 >
-                                  <Download className="w-4 h-4" />
+                                  {generatingPdf && pdfTargetOrder?._docId === order._docId ? (
+                                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent" />
+                                  ) : (
+                                    <Download className="w-4 h-4" />
+                                  )}
                                 </button>
                               </div>
                             </div>
@@ -2181,6 +2859,604 @@ export default function CustomerPortal() {
               referrerPolicy="no-referrer"
             />
           </div>
+        </div>
+      )}
+
+      {/* Mobile PDF Modal (matches Sales logic for WeChat/WhatsApp share & preview) */}
+      {mobilePdfModal.isOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-[99991] p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl p-4 sm:p-6 max-w-md w-full shadow-2xl relative border border-gray-100 flex flex-col my-auto max-h-[95vh]">
+            {/* Close Button */}
+            <button 
+              onClick={() => {
+                if (mobilePdfModal.url) {
+                  URL.revokeObjectURL(mobilePdfModal.url);
+                }
+                setMobilePdfModal(prev => ({ ...prev, isOpen: false }));
+              }}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1.5 bg-gray-100 hover:bg-gray-200 rounded-full transition-colors z-10 cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            {/* Header Icon & Title */}
+            <div className="flex items-center gap-3 mb-4 pr-8">
+              <div className="bg-blue-50 text-blue-600 p-2.5 rounded-xl flex items-center justify-center shrink-0">
+                <FileText className="w-6 h-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base sm:text-lg font-bold text-gray-900 truncate">
+                  PDF de Commande Généré
+                </h3>
+                <p className="text-xs text-gray-500 truncate">
+                  {mobilePdfModal.filename}
+                </p>
+              </div>
+            </div>
+
+            {/* PDF Info Card */}
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 mb-4 text-center">
+              <FileText className="w-12 h-12 text-blue-500 mx-auto mb-2 opacity-80" />
+              <div className="font-semibold text-sm text-gray-800 break-all mb-1">
+                {mobilePdfModal.filename}
+              </div>
+              <div className="text-xs text-gray-500">
+                Format: Document PDF officiel
+              </div>
+            </div>
+
+            {/* WeChat Note if applicable */}
+            {/MicroMessenger/i.test(navigator.userAgent) && (
+              <div className="bg-amber-50/90 border border-amber-200 text-amber-900 px-3 py-2.5 rounded-xl text-xs mb-4 flex items-start gap-2">
+                <span className="text-sm shrink-0">💡</span>
+                <div className="leading-snug">
+                  <span className="font-semibold">Note WeChat : </span>
+                  Si le téléchargement est bloqué dans WeChat, cliquez sur [···] puis 'Ouvrir dans le navigateur'.
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="space-y-2.5">
+              {navigator.canShare && mobilePdfModal.blob && (
+                <button
+                  onClick={async () => {
+                    if (mobilePdfModal.blob) {
+                      const file = new File([mobilePdfModal.blob], mobilePdfModal.filename, { type: 'application/pdf' });
+                      try {
+                        await navigator.share({
+                          files: [file],
+                          title: mobilePdfModal.filename,
+                          text: `Bon de commande - ${activePdfOrder?.customer?.['客户名'] || customer?.['客户名'] || ''}`
+                        });
+                      } catch (err) {
+                        console.error('Manual Web Share failed:', err);
+                      }
+                    }
+                  }}
+                  className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-1.5 shadow-md shadow-blue-100 transition-all cursor-pointer"
+                >
+                  <Share2 className="w-4 h-4" />
+                  Partager (WhatsApp / Système)
+                </button>
+              )}
+
+              <a
+                href={mobilePdfModal.url}
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-2.5 px-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all text-center"
+              >
+                <Eye className="w-4 h-4 text-gray-600" />
+                Visualiser le PDF
+              </a>
+
+              <a
+                href={mobilePdfModal.url}
+                download={mobilePdfModal.filename}
+                className="w-full py-2.5 px-3 bg-white hover:bg-gray-50 text-gray-700 rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-1.5 border border-gray-200 transition-all text-center"
+              >
+                <Download className="w-4 h-4 text-gray-500" />
+                Télécharger le PDF
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Debt Order Details Modal (点击订单号查看订单信息) */}
+      {viewingDebtOrder && (
+        <div 
+          className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+          onClick={() => setViewingDebtOrder(null)}
+        >
+          <div 
+            className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full my-auto border border-gray-200 flex flex-col max-h-[90vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/80">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      disabled={generatingPdf && pdfTargetOrder?.id === viewingDebtOrder.orderNo}
+                      onClick={() => {
+                        const orderToExport = buildOrderFromDebt(viewingDebtOrder);
+                        downloadFrenchPDF(orderToExport);
+                      }}
+                      className="text-base font-bold text-blue-600 hover:text-blue-800 hover:underline font-mono cursor-pointer flex items-center gap-1.5 text-left disabled:opacity-50"
+                      title="Cliquer pour télécharger directement le Bon de Commande (PDF)"
+                    >
+                      <span>Commande #{viewingDebtOrder.orderNo || 'Détails'}</span>
+                      {generatingPdf && pdfTargetOrder?.id === viewingDebtOrder.orderNo ? (
+                        <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-blue-600 border-t-transparent" />
+                      ) : (
+                        <Download className="w-4 h-4 text-blue-500" />
+                      )}
+                    </button>
+                    {checkIsOverdue(viewingDebtOrder.dueDate) ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse" />
+                        ÉCHU
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700 border border-emerald-200">
+                        À JOUR
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Aperçu de la commande et situation des paiements
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingDebtOrder(null)}
+                className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
+                title="Fermer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto space-y-4">
+              {/* Order Info Card Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">Date d'échéance</span>
+                  <strong className={`text-xs sm:text-sm font-mono block ${checkIsOverdue(viewingDebtOrder.dueDate) ? 'text-red-700 font-bold' : 'text-gray-900'}`}>
+                    {viewingDebtOrder.dueDate}
+                  </strong>
+                </div>
+
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">Date de commande</span>
+                  <strong className="text-xs sm:text-sm font-mono text-gray-900 block">
+                    {viewingDebtOrder.businessDate || '-'}
+                  </strong>
+                </div>
+
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">Commercial</span>
+                  <strong className="text-xs sm:text-sm text-gray-900 block truncate">
+                    {viewingDebtOrder.salesperson || customer?.['销售'] || '-'}
+                  </strong>
+                </div>
+
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">Destination / Région</span>
+                  <strong className="text-xs sm:text-sm text-gray-900 block truncate">
+                    {viewingDebtOrder.city || '-'}
+                  </strong>
+                </div>
+              </div>
+
+              {/* Financial Summary Strip */}
+              <div className="p-3.5 bg-blue-50/70 border border-blue-100 rounded-xl flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div>
+                    <span className="text-[11px] text-gray-500 block">Total de la commande</span>
+                    <strong className="text-sm font-bold text-gray-900 font-mono">
+                      CFA {Math.round(viewingDebtOrder.totalAmount || viewingDebtOrder.amount).toLocaleString('fr-FR')}
+                    </strong>
+                  </div>
+                  {viewingDebtOrder.settledAmount !== undefined && viewingDebtOrder.settledAmount > 0 && (
+                    <div>
+                      <span className="text-[11px] text-emerald-700 block">Montant déjà réglé</span>
+                      <strong className="text-sm font-bold text-emerald-700 font-mono">
+                        CFA {Math.round(viewingDebtOrder.settledAmount).toLocaleString('fr-FR')}
+                      </strong>
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-right sm:text-right">
+                  <span className="text-[11px] text-red-700 font-semibold block">Reste à payer (Impayé)</span>
+                  <strong className="text-base font-bold text-red-700 font-mono">
+                    CFA {Math.round(viewingDebtOrder.amount).toLocaleString('fr-FR')}
+                  </strong>
+                </div>
+              </div>
+
+              {/* Remarks if any */}
+              {viewingDebtOrder.remarks && (
+                <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-900 leading-relaxed">
+                  <strong className="block text-amber-950 font-semibold mb-1 flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5 text-amber-700" />
+                    Remarques :
+                  </strong>
+                  <div className="whitespace-pre-wrap font-mono text-[11px] text-amber-900">
+                    {viewingDebtOrder.remarks}
+                  </div>
+                </div>
+              )}
+
+              {/* Products Table */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
+                    <Package className="w-4 h-4 text-gray-500" />
+                    Articles de la commande
+                    {viewingDebtOrder.items && (
+                      <span className="text-gray-400 font-normal text-[11px]">
+                        ({viewingDebtOrder.items.length} articles)
+                      </span>
+                    )}
+                  </h4>
+                </div>
+
+                {viewingDebtOrder.items && viewingDebtOrder.items.length > 0 ? (
+                  <div className="border border-gray-200 rounded-xl overflow-hidden shadow-2xs">
+                    <div className="overflow-x-auto max-h-64">
+                      <table className="w-full text-left text-xs border-collapse font-mono">
+                        <thead className="bg-gray-50 text-gray-600 font-semibold sticky top-0 border-b border-gray-200 z-10">
+                          <tr>
+                            <th className="p-2.5 text-center w-10">#</th>
+                            <th className="p-2.5 font-sans">Désignation du produit</th>
+                            <th className="p-2.5 font-sans">Catégorie</th>
+                            <th className="p-2.5 text-right font-sans">Quantité</th>
+                            <th className="p-2.5 text-right font-sans">P.U (CFA)</th>
+                            <th className="p-2.5 text-right font-sans">Total (CFA)</th>
+                            <th className="p-2.5 text-right font-sans text-red-700">Reste dû</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 text-gray-800">
+                          {viewingDebtOrder.items.map((item, itIdx) => (
+                            <tr key={itIdx} className="hover:bg-gray-50/80 transition-colors">
+                              <td className="p-2.5 text-center text-gray-400 text-[11px]">{itIdx + 1}</td>
+                              <td className="p-2.5 font-semibold text-gray-900 font-sans">
+                                {translateProduct(item)}
+                              </td>
+                              <td className="p-2.5 text-gray-500 font-sans text-[11px]">
+                                {translateCategoryFr(item.category)}
+                              </td>
+                              <td className="p-2.5 text-right font-bold text-gray-900">
+                                {item.quantity.toLocaleString('fr-FR')}
+                              </td>
+                              <td className="p-2.5 text-right text-gray-600">
+                                {Math.round(item.unitPrice).toLocaleString('fr-FR')}
+                              </td>
+                              <td className="p-2.5 text-right font-semibold text-gray-900">
+                                {Math.round(item.totalPrice).toLocaleString('fr-FR')}
+                              </td>
+                              <td className="p-2.5 text-right font-bold text-red-700">
+                                {Math.round(item.unsettledAmount).toLocaleString('fr-FR')}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-gray-50/90 font-bold border-t border-gray-200 text-gray-900 sticky bottom-0">
+                          <tr>
+                            <td colSpan={3} className="p-2.5 text-right font-sans">
+                              Total général :
+                            </td>
+                            <td className="p-2.5 text-right text-blue-700">
+                              {viewingDebtOrder.items.reduce((s, it) => s + it.quantity, 0).toLocaleString('fr-FR')}
+                            </td>
+                            <td className="p-2.5"></td>
+                            <td className="p-2.5 text-right text-gray-900">
+                              CFA {Math.round(viewingDebtOrder.items.reduce((s, it) => s + it.totalPrice, 0)).toLocaleString('fr-FR')}
+                            </td>
+                            <td className="p-2.5 text-right text-red-700">
+                              CFA {Math.round(viewingDebtOrder.items.reduce((s, it) => s + it.unsettledAmount, 0)).toLocaleString('fr-FR')}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 text-center text-xs text-gray-500">
+                    Aucun article détaillé disponible pour cette commande.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-5 py-3.5 border-t border-gray-100 flex items-center justify-between flex-wrap gap-2 bg-gray-50/80">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  disabled={generatingPdf && pdfTargetOrder?.id === viewingDebtOrder.orderNo}
+                  onClick={() => {
+                    const orderToExport = buildOrderFromDebt(viewingDebtOrder);
+                    downloadFrenchPDF(orderToExport);
+                  }}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+                  title="Télécharger le Bon de Commande officiel en PDF"
+                >
+                  {generatingPdf && pdfTargetOrder?.id === viewingDebtOrder.orderNo ? (
+                    <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-white border-t-transparent" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )}
+                  <span>Télécharger Bon de Commande (PDF)</span>
+                </button>
+
+                {(() => {
+                  const matchedSystemOrder = allOrders.find(o => o.id === viewingDebtOrder.orderNo);
+                  if (matchedSystemOrder) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewingDebtOrder(null);
+                          setViewingOrder(matchedSystemOrder);
+                          setActiveTab('history');
+                        }}
+                        className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Eye className="w-4 h-4 text-blue-600" />
+                        <span>Voir dans l'historique des commandes</span>
+                      </button>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setViewingDebtOrder(null)}
+                className="px-4 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs font-bold rounded-lg transition-colors cursor-pointer ml-auto"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hidden Order Export Element (Identical to Sales logic: categories, product images, totals) */}
+      {activePdfOrder && (
+        <div 
+          ref={orderExportRef} 
+          style={{ 
+            display: 'none', 
+            position: 'static', 
+            width: '200mm', 
+            background: 'white', 
+            padding: '10mm', 
+            boxSizing: 'border-box', 
+            color: 'black', 
+            fontFamily: 'Arial, sans-serif' 
+          }}
+        >
+          <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+            <h1 style={{ fontSize: '28px', margin: '0 0 10px 0', fontWeight: 'bold' }}>Bon de Commande</h1>
+          </div>
+          
+          <div style={{ marginBottom: '20px', fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ marginBottom: '5px' }}><strong>Client:</strong> {activePdfOrder.customer?.['客户名'] || customer?.['客户名']}</div>
+              <div style={{ marginBottom: '5px' }}><strong>Code Client:</strong> {activePdfOrder.customer?.['客户代码'] || customer?.['客户代码'] || '-'}</div>
+              <div style={{ marginBottom: '5px' }}><strong>Tél:</strong> {activePdfOrder.customer?.['电话号码'] || customer?.['电话号码'] || '-'}</div>
+              <div><strong>Région:</strong> {activePdfOrder.customer?.['所在地区'] || customer?.['所在地区'] || '-'}</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ marginBottom: '5px' }}>
+                <strong>Date:</strong> {
+                  activePdfOrder.businessDate 
+                    ? activePdfOrder.businessDate 
+                    : (activePdfOrder.createdAt?.seconds 
+                        ? new Date(activePdfOrder.createdAt.seconds * 1000).toLocaleDateString('fr-FR')
+                        : (activePdfOrder.createdAt?.toDate ? activePdfOrder.createdAt.toDate().toLocaleDateString('fr-FR') : new Date().toLocaleDateString('fr-FR')))
+                }
+              </div>
+              <div>
+                <strong>No. Commande:</strong> {
+                  activePdfOrder.id?.toUpperCase().includes('NEW') 
+                    ? 'NEW ORDER' 
+                    : (activePdfOrder.id?.includes('-') ? activePdfOrder.id.toUpperCase() : (activePdfOrder.id?.length > 12 ? activePdfOrder.id.slice(-8).toUpperCase() : (activePdfOrder.id || '-').toUpperCase()))
+                }
+              </div>
+            </div>
+          </div>
+
+          <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid #333', tableLayout: 'fixed' }}>
+            <thead>
+              <tr style={{ background: '#f8f9fa' }}>
+                <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '140px', fontWeight: 'bold', fontSize: '13px' }}>Image</th>
+                <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', fontWeight: 'bold', fontSize: '13px' }}>Désignation</th>
+                <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '60px', fontWeight: 'bold', fontSize: '13px' }}>Qté</th>
+                <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '90px', fontWeight: 'bold', fontSize: '13px' }}>P.U.</th>
+                <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '100px', fontWeight: 'bold', fontSize: '13px' }}>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(() => {
+                const categories = [
+                  { id: 'bassine', label: 'Bassine', check: (n: string) => n.toLowerCase().includes('盆') || n.toLowerCase().includes('bassine') },
+                  { id: 'seau', label: 'Seau', check: (n: string) => n.toLowerCase().includes('桶') || n.toLowerCase().includes('尿壶') || n.toLowerCase().includes('seau') || n.toLowerCase().includes('urinal') },
+                  { id: 'satala', label: 'Satalas&Goblet&Tasse', check: (n: string) => (n.toLowerCase().includes('壶') || n.toLowerCase().includes('杯') || n.toLowerCase().includes('阿拉丁神灯') || n.toLowerCase().includes('satala') || n.toLowerCase().includes('goblet') || n.toLowerCase().includes('tasse') || n.toLowerCase().includes('lampe')) && !(n.toLowerCase().includes('尿壶') || n.toLowerCase().includes('urinal')) },
+                  { id: 'chaise', label: 'Tabouret&Chaise', check: (n: string) => n.toLowerCase().includes('椅') || n.toLowerCase().includes('凳') || n.toLowerCase().includes('chaise') || n.toLowerCase().includes('tabouret') },
+                  { id: 'autres', label: 'Autres', check: () => true }
+                ];
+
+                const grouped: Record<string, any[]> = {};
+                categories.forEach(c => grouped[c.id] = []);
+
+                activePdfOrder.items?.forEach((item: any) => {
+                  const name = `${item.materialName || ''} ${item.frenchName || ''} ${item.materialCode || ''}`;
+                  const cat = categories.find(c => c.check(name));
+                  if (cat) grouped[cat.id].push(item);
+                });
+
+                return categories.map(cat => {
+                  const items = grouped[cat.id];
+                  if (items.length === 0) return null;
+
+                  // Group by material code to sum quantities
+                  const materialGroups: Record<string, any> = {};
+                  items.forEach(item => {
+                    const code = item.materialCode || item.materialName;
+                    if (!materialGroups[code]) {
+                      materialGroups[code] = {
+                        ...item,
+                        quantity: 0,
+                        totalPrice: 0
+                      };
+                    }
+                    materialGroups[code].quantity += Number(item.quantity) || 0;
+                    materialGroups[code].totalPrice += Number(item.totalPrice) || (Number(item.quantity) * Number(item.unitPrice)) || 0;
+                  });
+                  
+                  const groupArray = Object.values(materialGroups);
+
+                  return (
+                    <React.Fragment key={cat.id}>
+                      <tr style={{ background: '#f8f9fa', breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                        <td colSpan={5} style={{ border: '1px solid #333', padding: '8px 10px', fontWeight: 'bold', fontSize: '14px', textAlign: 'left' }}>
+                          {cat.label}
+                        </td>
+                      </tr>
+                      {groupArray.map((item: any, idx: number) => {
+                        const priceData = findPriceItem(item);
+                        const imageUrl = priceData?.['图片'];
+                        
+                        return (
+                          <tr key={`${cat.id}-${idx}`} style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                            <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle' }}>
+                              {imageUrl ? (
+                                <div style={{ width: '140px', height: '140px', margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8f9fa', overflow: 'hidden' }}>
+                                  <img 
+                                    src={imageUrl} 
+                                    alt="" 
+                                    crossOrigin="anonymous"
+                                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
+                                    referrerPolicy="no-referrer"
+                                  />
+                                </div>
+                              ) : null}
+                            </td>
+                            <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px', textTransform: 'uppercase', fontWeight: 'bold' }}>
+                              {translateProduct(item)}
+                            </td>
+                            <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px' }}>
+                              {item.quantity}
+                            </td>
+                            <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px' }}>
+                              {Math.round(item.unitPrice).toLocaleString()}
+                            </td>
+                            <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px', fontWeight: 'bold' }}>
+                              {Math.round(item.totalPrice).toLocaleString()}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
+                  );
+                });
+              })()}
+              <tr>
+                <td colSpan={4} style={{ border: '1px solid #333', padding: '10px', textAlign: 'right', fontWeight: 'bold', fontSize: '16px' }}>
+                  Total Général
+                </td>
+                <td style={{ border: '1px solid #333', padding: '10px', textAlign: 'right', fontWeight: 'bold', fontSize: '16px', background: '#f8f9fa' }}>
+                  {Math.round(activePdfOrder.totalAmount || 0).toLocaleString()}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          {/* Situation Financière & Impayés Client (100% French) */}
+          {(() => {
+            const stats = getCustomerCreditStats(activePdfOrder.customer || customer);
+            const { totalCredit, totalDebt, remainingCredit, custDebts, overdueDebts, overdueTotal } = stats;
+            if (!custDebts || (custDebts.length === 0 && totalCredit === 0)) return null;
+
+            return (
+              <div style={{ marginTop: '20px', border: '1.5px solid #dc2626', borderRadius: '6px', padding: '12px 14px', background: '#fffaf0', breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', borderBottom: '1px solid #fecaca', paddingBottom: '6px', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#991b1b' }}>
+                    Situation Financière & Impayés Client
+                  </div>
+                  <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#111827', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <span>Total Crédit : <strong style={{ color: '#1d4ed8' }}>CFA {Math.round(totalCredit).toLocaleString('fr-FR')}</strong></span>
+                    <span>Crédit Restant : <strong style={{ color: remainingCredit < 0 ? '#b91c1c' : '#15803d' }}>CFA {Math.round(remainingCredit).toLocaleString('fr-FR')}{remainingCredit < 0 ? ' (Dépassement)' : ''}</strong></span>
+                    <span>Total Impayés : <strong style={{ color: '#b91c1c' }}>CFA {Math.round(totalDebt).toLocaleString('fr-FR')}</strong></span>
+                  </div>
+                </div>
+
+                {overdueTotal > 0 && (
+                  <div style={{ background: '#fee2e2', border: '1px solid #f87171', color: '#991b1b', padding: '6px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>⚠️ Impayés Échus :</span>
+                    <span>CFA {Math.round(overdueTotal).toLocaleString('fr-FR')} ({overdueDebts.length} échéance(s) en retard)</span>
+                  </div>
+                )}
+
+                {custDebts.length > 0 && (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', background: '#ffffff', border: '1px solid #e5e7eb' }}>
+                    <thead>
+                      <tr style={{ background: '#f3f4f6', color: '#374151' }}>
+                        <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'left', fontWeight: 'bold', width: '130px' }}>N° Commande</th>
+                        <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'left', fontWeight: 'bold' }}>Date d'échéance</th>
+                        <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', fontWeight: 'bold' }}>Montant (CFA)</th>
+                        <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'center', fontWeight: 'bold', width: '110px' }}>Statut</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {custDebts.map((d, dIdx) => {
+                        const isOd = checkIsOverdue(d.dueDate);
+                        return (
+                          <tr key={dIdx} style={{ background: isOd ? '#fff5f5' : '#ffffff' }}>
+                            <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', fontFamily: 'monospace', fontWeight: 'bold', color: '#1d4ed8' }}>
+                              #{d.orderNo || '-'}
+                            </td>
+                            <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', fontWeight: isOd ? 'bold' : 'normal', color: isOd ? '#dc2626' : '#1f2937' }}>
+                              {d.dueDate}
+                            </td>
+                            <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', fontWeight: isOd ? 'bold' : 'normal', color: isOd ? '#dc2626' : '#1f2937' }}>
+                              CFA {Math.round(d.amount).toLocaleString('fr-FR')}
+                            </td>
+                            <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'center' }}>
+                              {isOd ? (
+                                <span style={{ color: '#dc2626', fontWeight: 'bold', background: '#fee2e2', padding: '2px 6px', borderRadius: '3px', fontSize: '11px', display: 'inline-block' }}>
+                                  ÉCHU
+                                </span>
+                              ) : (
+                                <span style={{ color: '#15803d', fontWeight: '500', fontSize: '11px', display: 'inline-block' }}>
+                                  En cours
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

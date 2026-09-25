@@ -112,9 +112,29 @@ interface PriceItem {
   '图片': string;
 }
 
-interface DebtItem {
+export interface DebtOrderItem {
+  materialName: string;
+  category?: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  settledAmount?: number;
+  unsettledAmount: number;
+}
+
+export interface DebtItem {
+  orderNo?: string;
   dueDate: string;
   amount: number;
+  totalAmount?: number;
+  settledAmount?: number;
+  businessDate?: string;
+  salesperson?: string;
+  customerName?: string;
+  customerCode?: string;
+  city?: string;
+  remarks?: string;
+  items?: DebtOrderItem[];
 }
 
 interface OrderItem {
@@ -179,6 +199,8 @@ export default function App() {
 
   const [currentView, setCurrentView] = useState<'list' | 'create' | 'detail' | 'users'>('list');
   const [viewingOrder, setViewingOrder] = useState<Order | null>(null);
+  const [pdfTargetOrder, setPdfTargetOrder] = useState<any>(null);
+  const activePdfOrder = pdfTargetOrder || viewingOrder;
   const [printMode, setPrintMode] = useState<'normal' | 'french'>('normal');
   const [isEditingOrderId, setIsEditingOrderId] = useState(false);
   const [orderIdInput, setOrderIdInput] = useState('');
@@ -393,111 +415,123 @@ export default function App() {
     }
   };
 
-  const handleGenerateOrderPdf = async () => {
-    if (!viewingOrder || !orderExportRef.current) {
-      console.error('Missing order or orderExportRef');
+  const handleGenerateOrderPdf = async (customOrder?: any) => {
+    const targetOrder = customOrder || viewingOrder;
+    if (!targetOrder) {
+      console.error('Missing order to export');
       return;
     }
     
+    setPdfTargetOrder(targetOrder);
     setGeneratingPdf(true);
-    const element = orderExportRef.current;
-    
-    // Temporarily bring element into layout flow for html2pdf container cloning and dimension calculation
-    const originalDisplay = element.style.display;
-    const originalPosition = element.style.position;
-    const originalLeft = element.style.left;
-    const originalTop = element.style.top;
-    
-    element.style.display = 'block';
-    element.style.position = 'static';
-    element.style.left = '0';
-    element.style.top = '0';
 
-    try {
-      // Ensure layout and images have settled before cloning into html2pdf worker
-      await new Promise(r => setTimeout(r, 250));
-
-      const customerName = viewingOrder.customer?.['客户名'] || 'Client';
-      const totalAmount = viewingOrder.items?.reduce((sum: number, item: any) => sum + (item.totalPrice || 0), 0) || 0;
-      const filename = `${customerName}_${Math.round(totalAmount)}.pdf`;
+    setTimeout(async () => {
+      if (!orderExportRef.current) {
+        setGeneratingPdf(false);
+        setPdfTargetOrder(null);
+        return;
+      }
+      const element = orderExportRef.current;
       
-      const opt = {
-        margin:       [10, 5, 10, 5] as [number, number, number, number],
-        filename:     filename,
-        image:        { type: 'jpeg' as const, quality: 0.98 },
-        html2canvas:  { 
-          scale: 2, 
-          useCORS: true,
-          allowTaint: true,
-          letterRendering: true,
-          logging: false,
-          scrollY: 0,
-          scrollX: 0
-        },
-        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' as const },
-        pagebreak:    { mode: ['css', 'legacy'], avoid: ['tr', 'h1', 'h2', 'h3'] }
-      };
+      // Temporarily bring element into layout flow for html2pdf container cloning and dimension calculation
+      const originalDisplay = element.style.display;
+      const originalPosition = element.style.position;
+      const originalLeft = element.style.left;
+      const originalTop = element.style.top;
+      
+      element.style.display = 'block';
+      element.style.position = 'static';
+      element.style.left = '0';
+      element.style.top = '0';
 
-      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      try {
+        // Ensure layout and images have settled before cloning into html2pdf worker
+        await new Promise(r => setTimeout(r, 250));
 
-      const restoreElement = () => {
+        const customerName = targetOrder.customer?.['客户名'] || 'Client';
+        const totalAmount = targetOrder.items?.reduce((sum: number, item: any) => sum + (item.totalPrice || 0), 0) || targetOrder.totalAmount || 0;
+        const filename = `${customerName}_${Math.round(totalAmount)}.pdf`;
+        
+        const opt = {
+          margin:       [10, 5, 10, 5] as [number, number, number, number],
+          filename:     filename,
+          image:        { type: 'jpeg' as const, quality: 0.98 },
+          html2canvas:  { 
+            scale: 2, 
+            useCORS: true,
+            allowTaint: true,
+            letterRendering: true,
+            logging: false,
+            scrollY: 0,
+            scrollX: 0
+          },
+          jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' as const },
+          pagebreak:    { mode: ['css', 'legacy'], avoid: ['tr', 'h1', 'h2', 'h3'] }
+        };
+
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        const restoreElement = () => {
+          element.style.display = originalDisplay;
+          element.style.position = originalPosition;
+          element.style.left = originalLeft;
+          element.style.top = originalTop;
+          setGeneratingPdf(false);
+          setPdfTargetOrder(null);
+        };
+
+        if (isMobile) {
+          // First generate as Blob for preview / share modal on mobile
+          html2pdf().set(opt).from(element).output('blob').then(async (pdfBlob: Blob) => {
+            restoreElement();
+
+            const url = URL.createObjectURL(pdfBlob);
+            setMobilePdfModal({
+              isOpen: true,
+              url,
+              filename,
+              blob: pdfBlob
+            });
+
+            // Try direct native share
+            const file = new File([pdfBlob], filename, { type: 'application/pdf' });
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+              try {
+                await navigator.share({
+                  files: [file],
+                  title: filename,
+                  text: `Bon de commande PDF - ${customerName}`
+                });
+              } catch (shareErr) {
+                console.log('Mobile share dismissed', shareErr);
+              }
+            }
+          }).catch((err: any) => {
+            console.error('Mobile PDF Blob Generation Error:', err);
+            restoreElement();
+            alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
+          });
+        } else {
+          // Desktop - Use standard save
+          html2pdf().set(opt).from(element).save().then(() => {
+            restoreElement();
+          }).catch((err: any) => {
+            console.error('PDF Generation Error:', err);
+            restoreElement();
+            alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
+          });
+        }
+      } catch (err: any) {
+        console.error('PDF Generation Setup Error:', err);
         element.style.display = originalDisplay;
         element.style.position = originalPosition;
         element.style.left = originalLeft;
         element.style.top = originalTop;
         setGeneratingPdf(false);
-      };
-
-      if (isMobile) {
-        // First generate as Blob for preview / share modal on mobile
-        html2pdf().set(opt).from(element).output('blob').then(async (pdfBlob: Blob) => {
-          restoreElement();
-
-          const url = URL.createObjectURL(pdfBlob);
-          setMobilePdfModal({
-            isOpen: true,
-            url,
-            filename,
-            blob: pdfBlob
-          });
-
-          // Try direct native share
-          const file = new File([pdfBlob], filename, { type: 'application/pdf' });
-          if (navigator.canShare && navigator.canShare({ files: [file] })) {
-            try {
-              await navigator.share({
-                files: [file],
-                title: filename,
-                text: `Bon de commande PDF - ${customerName}`
-              });
-            } catch (shareErr) {
-              console.log('Mobile share dismissed', shareErr);
-            }
-          }
-        }).catch((err: any) => {
-          console.error('Mobile PDF Blob Generation Error:', err);
-          restoreElement();
-          alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
-        });
-      } else {
-        // Desktop - Use standard save
-        html2pdf().set(opt).from(element).save().then(() => {
-          restoreElement();
-        }).catch((err: any) => {
-          console.error('PDF Generation Error:', err);
-          restoreElement();
-          alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
-        });
+        setPdfTargetOrder(null);
+        alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
       }
-    } catch (err: any) {
-      console.error('PDF Generation Setup Error:', err);
-      element.style.display = originalDisplay;
-      element.style.position = originalPosition;
-      element.style.left = originalLeft;
-      element.style.top = originalTop;
-      setGeneratingPdf(false);
-      alert(t('PDF生成失败，请重试', 'Échec de la génération du PDF'));
-    }
+    }, 50);
   };
 
   const handleCopyImageToClipboard = async () => {
@@ -570,6 +604,12 @@ export default function App() {
     return [];
   });
   const [debts, setDebts] = useState<Record<string, DebtItem[]>>({});
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [prices, setPrices] = useState<PriceItem[]>([]);
+  const [inventoryUpdateTime, setInventoryUpdateTime] = useState<string>('');
+  const [refreshingInventory, setRefreshingInventory] = useState<boolean>(false);
+  const [viewingDebtOrder, setViewingDebtOrder] = useState<DebtItem | null>(null);
   const [generatingImage, setGeneratingImage] = useState(false);
   const [generatingPdf, setGeneratingPdf] = useState(false);
 
@@ -887,11 +927,167 @@ export default function App() {
       custDebts.forEach(d => {
         const isOd = checkIsOverdue(d.dueDate);
         const formattedAmount = `CFA ${Math.round(d.amount).toLocaleString('zh-CN')}`;
-        lines.push(`${d.dueDate} ${formattedAmount}${isOd ? ' (已逾期)' : ''}`);
+        lines.push(`${d.orderNo ? `【${d.orderNo}】` : ''}${d.dueDate} ${formattedAmount}${isOd ? ' (已逾期)' : ''}`);
       });
     }
 
     return lines.join('\n');
+  };
+
+  const findPriceItem = useCallback((item: any) => {
+    if (!item) return undefined;
+    const code = item.materialCode || '';
+    const name = item.materialName || '';
+    const fr = item.frenchName || '';
+    const normCode = (code || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+    const normName = (name || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+    const normFr = (fr || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+
+    return prices.find((p: any) => {
+      const pName = (p['物料名称'] || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+      const pCode = (p['物料代码'] || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+      return (
+        (pName && (pName === normName || pName === normCode || pName === normFr)) ||
+        (pCode && (pCode === normCode || pCode === normName || pCode === normFr))
+      );
+    }) || prices.find((p: any) => {
+      const pName = (p['物料名称'] || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+      return pName && normName && (normName.includes(pName) || pName.includes(normName));
+    });
+  }, [prices]);
+
+  const translateProductForPdf = useCallback((item: any) => {
+    if (item?.frenchName && !/[\u4e00-\u9fa5]/.test(item.frenchName)) {
+      return item.frenchName;
+    }
+    const name = item?.materialName || '';
+    const norm = (name || '').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, ' ').trim().toLowerCase();
+    const aliases: Record<string, string> = {
+      '扶手椅子-菱形钢管椅--90': 'CHAISE PIED METAL 01',
+      '扶手椅子/': 'CHAISE PIED METAL 01',
+      '菱格钢管椅': 'CHAISE PIED METAL 01',
+      '0.4升v型口杯': 'TASSE 0.4L V',
+      '0.4lv型口杯': 'TASSE 0.4L V',
+      '0.4升口杯': 'TASSE 0.4L',
+      '0.4l口杯': 'TASSE 0.4L',
+      '0.4升水杯': 'GOBLET 0.4L',
+      '0.4l水杯': 'GOBLET 0.4L',
+      '30l方耳盆': 'BASSINE 30L POIGNEE CARRE',
+      '30l圆耳盆': 'BASSINE POIGNEE CLAIR 30L RONDE',
+      '40l簿塑料盆': 'BASSINE CLAIR 40L LEGER',
+      '20l油壶': 'BIDON 20L',
+      '扁平果盘(大)': 'PANIER PLAT GRAND',
+      '扁平果盘(中)': 'PANIER PLAT MID',
+      '扁平果盘(小)': 'PANIER PLAT PETIT',
+      '套盆a/': 'BOL A',
+      '套盆a+b+c': 'BOL A+B+C',
+      '凳子/ 47高': 'TABOURET 47CM',
+      '不锈钢水塔 1000l': 'RÉSERVOIR INOX 1000L',
+      '不锈钢水塔 2000l': 'RÉSERVOIR INOX 2000L',
+      '过滤器 3pouce': 'FILTRE 3 POUCES',
+      '滴灌带 drip tape type 200': 'BANDE GOUTTE-À-GOUTTE TYPE 200',
+      '勺子': 'LOUCHE',
+      '穆斯林椅子': 'CHAISE MUSULMAN',
+      '15l厚盆': 'BASSINE 15L NOIR LOURD'
+    };
+    if (aliases[norm]) return aliases[norm];
+    const priceItem = findPriceItem(item);
+    if (priceItem) {
+      const fr = getFrenchName(priceItem);
+      if (fr) return fr;
+    }
+    if (/[\u4e00-\u9fa5]/.test(name)) {
+      if (name.includes('密胺餐盘')) return `ASSIETTE MÉLAMINE ${name.replace(/密胺餐盘/, '').trim()}`;
+      if (name.includes('盆')) return `BASSINE ${name.replace(/盆/, '').trim()}`.trim();
+      if (name.includes('桶')) return `SEAU ${name.replace(/桶/, '').trim()}`.trim();
+      if (name.includes('壶')) return `SATALAS / BIDON ${name.replace(/壶/, '').trim()}`.trim();
+      if (name.includes('杯')) return `GOBLET ${name.replace(/杯/, '').trim()}`.trim();
+      if (name.includes('椅')) return `CHAISE ${name.replace(/椅/, '').trim()}`.trim();
+      if (name.includes('凳')) return `TABOURET ${name.replace(/凳/, '').trim()}`.trim();
+    }
+    return item?.frenchName || item?.materialCode || item?.materialName || '-';
+  }, [findPriceItem, prices]);
+
+  const buildOrderFromDebt = useCallback((d: DebtItem): any => {
+    const matched = orders.find(o => o.id === d.orderNo || (o._docId && o._docId === d.orderNo));
+    if (matched && matched.items && matched.items.length > 0) {
+      return {
+        ...matched,
+        customer: {
+          '客户名': matched.customer?.['客户名'] || d.customerName || customers.find(c => c['客户代码'] === d.customerCode)?.['客户名'] || '',
+          '客户代码': matched.customer?.['客户代码'] || d.customerCode || '',
+          '电话号码': matched.customer?.['电话号码'] || customers.find(c => c['客户代码'] === d.customerCode)?.['电话号码'] || '',
+          '所在地区': matched.customer?.['所在地区'] || d.city || '',
+          '销售': matched.customer?.['销售'] || d.salesperson || '',
+          '信用额度': matched.customer?.['信用额度'] || customers.find(c => c['客户代码'] === d.customerCode)?.['信用额度'] || ''
+        }
+      };
+    }
+
+    const matchedCustomer = customers.find(c => 
+      (d.customerCode && c['客户代码'] === d.customerCode) || 
+      (d.customerName && c['客户名'] === d.customerName)
+    );
+
+    const items = (d.items && d.items.length > 0)
+      ? d.items.map((it, idx) => {
+          const priceData = findPriceItem(it);
+          const materialCode = priceData ? priceData['物料代码'] : (it.materialName || `ITEM-${idx + 1}`);
+          const frenchName = priceData ? (priceData['物料代码'] || priceData['法语名称'] || it.materialName) : it.materialName;
+          return {
+            id: `${materialCode}-${idx}`,
+            materialCode,
+            materialName: it.materialName,
+            frenchName: frenchName || it.materialName,
+            color: 'Standard',
+            quantity: Number(it.quantity) || 0,
+            unitPrice: Number(it.unitPrice) || 0,
+            totalPrice: Number(it.totalPrice) || ((Number(it.quantity) || 0) * (Number(it.unitPrice) || 0))
+          };
+        })
+      : [
+          {
+            id: 'ITEM-1',
+            materialCode: d.orderNo || 'COMMANDE',
+            materialName: `Bon de livraison #${d.orderNo}`,
+            frenchName: `Bon de livraison #${d.orderNo}`,
+            color: 'Standard',
+            quantity: 1,
+            unitPrice: d.totalAmount || d.amount,
+            totalPrice: d.totalAmount || d.amount
+          }
+        ];
+
+    const parsedDate = d.businessDate ? new Date(d.businessDate.replace(/\//g, '-')) : new Date();
+    const effectiveTotal = d.totalAmount || d.amount || items.reduce((sum, it) => sum + it.totalPrice, 0);
+
+    return {
+      _docId: d.orderNo || `DEBT-${Date.now()}`,
+      id: d.orderNo || 'COMMANDE',
+      status: checkIsOverdue(d.dueDate) ? 'Échu' : 'Livré',
+      businessDate: d.businessDate || d.dueDate,
+      createdAt: {
+        toDate: () => (!isNaN(parsedDate.getTime()) ? parsedDate : new Date()),
+        seconds: Math.floor((!isNaN(parsedDate.getTime()) ? parsedDate.getTime() : Date.now()) / 1000)
+      },
+      customer: {
+        '客户名': d.customerName || matchedCustomer?.['客户名'] || '',
+        '客户代码': d.customerCode || matchedCustomer?.['客户代码'] || '',
+        '电话号码': matchedCustomer?.['电话号码'] || '',
+        '所在地区': d.city || matchedCustomer?.['所在地区'] || '',
+        '销售': d.salesperson || matchedCustomer?.['销售'] || '',
+        '信用额度': matchedCustomer?.['信用额度'] || ''
+      },
+      items,
+      totalAmount: effectiveTotal,
+      remarks: d.remarks || '',
+      salespersonName: d.salesperson || matchedCustomer?.['销售'] || ''
+    };
+  }, [orders, prices, customers]);
+
+  const handleDownloadDebtPdf = (d: DebtItem) => {
+    const orderObj = buildOrderFromDebt(d);
+    handleGenerateOrderPdf(orderObj);
   };
 
   const getCustomerNote = (customer: Partial<Customer> | null | undefined): string => {
@@ -975,12 +1171,6 @@ export default function App() {
       return timeStr;
     }
   };
-
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [inventory, setInventory] = useState<InventoryItem[]>([]);
-  const [prices, setPrices] = useState<PriceItem[]>([]);
-  const [inventoryUpdateTime, setInventoryUpdateTime] = useState<string>('');
-  const [refreshingInventory, setRefreshingInventory] = useState<boolean>(false);
 
   const refreshInventory = async () => {
     setRefreshingInventory(true);
@@ -2727,15 +2917,6 @@ export default function App() {
             >
               {t('登录系统', 'Se connecter')}
             </button>
-            <div className="mt-4 pt-3 border-t border-gray-100 text-center">
-              <a
-                href="/client"
-                className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 font-semibold hover:underline"
-              >
-                <span>👉</span>
-                <span>{t('客户专用订货入口 (Espace Client)', 'Accès Espace Client')}</span>
-              </a>
-            </div>
           </form>
         </div>
       </div>
@@ -3298,6 +3479,23 @@ export default function App() {
                                 </span>
                               )}
                               <span>{order.id}</span>
+                              <button
+                                type="button"
+                                disabled={generatingPdf && pdfTargetOrder?._docId === order._docId}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleGenerateOrderPdf(order);
+                                }}
+                                className="ml-1 p-1 text-gray-400 hover:text-blue-700 hover:bg-blue-50 rounded transition-colors inline-flex items-center gap-0.5 text-[11px] font-sans font-semibold disabled:opacity-50"
+                                title={t('下载订购单PDF', 'Télécharger Bon de Commande (PDF)')}
+                              >
+                                {generatingPdf && pdfTargetOrder?._docId === order._docId ? (
+                                  <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-600 border-t-transparent" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5 text-blue-500" />
+                                )}
+                                <span className="text-[10px] bg-blue-100 text-blue-700 px-1 py-0.2 rounded">PDF</span>
+                              </button>
                             </div>
                           </td>
                           <td className="px-6 py-4 text-gray-600">
@@ -3434,7 +3632,18 @@ export default function App() {
                                 {t('置顶', 'PIN')}
                               </span>
                             )}
-                            <span className="text-sm font-bold text-blue-600">#{order.id}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleGenerateOrderPdf(order);
+                              }}
+                              className="text-sm font-bold text-blue-600 hover:text-blue-800 font-mono inline-flex items-center gap-1 cursor-pointer"
+                              title={t('点击下载PDF', 'Télécharger Bon de Commande (PDF)')}
+                            >
+                              <span>#{order.id}</span>
+                              <span className="text-[10px] bg-blue-100 text-blue-700 px-1 py-0.2 rounded font-sans font-semibold">PDF</span>
+                            </button>
                             {order.isPriority && <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />}
                           </div>
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
@@ -3541,7 +3750,21 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="flex items-center gap-2">
-                    <h2 className="text-xl font-bold text-gray-800">#{viewingOrder.id}</h2>
+                    <button
+                      type="button"
+                      disabled={generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId}
+                      onClick={() => handleGenerateOrderPdf(viewingOrder)}
+                      className="text-xl font-bold text-blue-600 hover:text-blue-800 hover:underline font-mono inline-flex items-center gap-1.5 cursor-pointer"
+                      title={t('点击直接下载PDF', 'Cliquer pour télécharger directement le Bon de Commande (PDF)')}
+                    >
+                      <span>#{viewingOrder.id}</span>
+                      {generatingPdf && pdfTargetOrder?._docId === viewingOrder._docId ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-600 border-t-transparent" />
+                      ) : (
+                        <Download className="w-4 h-4 text-blue-600" />
+                      )}
+                      <span className="text-[11px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-sans font-semibold">PDF</span>
+                    </button>
                     {(userRole === 'admin' || userRole === '助销' || userRole === '销售') && (
                       <button 
                         onClick={() => { setOrderIdInput(viewingOrder.id); setIsEditingOrderId(true); }} 
@@ -3819,7 +4042,39 @@ export default function App() {
                             const isOd = checkIsOverdue(d.dueDate);
                             return (
                               <div key={dIdx} className={`flex justify-between items-center py-1 px-1.5 rounded ${isOd ? 'bg-red-50/70 text-red-700 font-bold' : 'text-gray-700 border-b border-gray-50 last:border-0'}`}>
-                                <span>{d.dueDate} {isOd ? `(${t('已逾期', 'En retard')})` : ''}</span>
+                                <div className="flex items-center gap-1.5">
+                                  {d.orderNo && (
+                                    <div className="inline-flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={generatingPdf && pdfTargetOrder?.id === d.orderNo}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDownloadDebtPdf(d);
+                                        }}
+                                        className="text-blue-600 hover:text-blue-800 hover:underline font-bold cursor-pointer inline-flex items-center gap-1 group font-mono text-xs disabled:opacity-50"
+                                        title={t('点击直接下载PDF', 'Cliquer pour télécharger directement le Bon de Commande (PDF)')}
+                                      >
+                                        {generatingPdf && pdfTargetOrder?.id === d.orderNo ? (
+                                          <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-600 border-t-transparent inline-block shrink-0" />
+                                        ) : (
+                                          <Download className="w-3 h-3 text-blue-500 group-hover:text-blue-700 shrink-0" />
+                                        )}
+                                        <span>#{d.orderNo}</span>
+                                        <span className="text-[9px] bg-blue-100 text-blue-700 px-1 rounded font-sans font-semibold">PDF</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setViewingDebtOrder(d)}
+                                        className="p-0.5 text-gray-400 hover:text-blue-600 rounded transition-colors cursor-pointer"
+                                        title={t('查看出库明细', 'Voir les détails')}
+                                      >
+                                        <Eye className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
+                                  <span>{d.dueDate} {isOd ? `(${t('已逾期', 'En retard')})` : ''}</span>
+                                </div>
                                 <span>CFA {Math.round(d.amount).toLocaleString('zh-CN')}</span>
                               </div>
                             );
@@ -4109,197 +4364,227 @@ export default function App() {
             </div>
             </div>
 
-            <div ref={orderExportRef} style={{ display: 'none', position: 'static', width: '200mm', background: 'white', padding: '10mm', boxSizing: 'border-box', color: 'black', fontFamily: 'Arial, sans-serif' }}>
-              <div style={{ textAlign: 'center', marginBottom: '30px' }}>
-                <h1 style={{ fontSize: '28px', margin: '0 0 10px 0', fontWeight: 'bold' }}>Bon de Commande</h1>
-              </div>
-              
-              <div style={{ marginBottom: '20px', fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
-                <div>
-                  <div style={{ marginBottom: '5px' }}><strong>Client:</strong> {viewingOrder.customer?.['客户名']}</div>
-                  <div style={{ marginBottom: '5px' }}><strong>Code Client:</strong> {viewingOrder.customer?.['客户代码'] || customers.find(c => c['客户名'] === viewingOrder.customer?.['客户名'])?.['客户代码'] || '-'}</div>
-                  <div style={{ marginBottom: '5px' }}><strong>Tél:</strong> {viewingOrder.customer?.['电话号码'] || '-'}</div>
-                  <div><strong>Région:</strong> {viewingOrder.customer?.['所在地区'] || '-'}</div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ marginBottom: '5px' }}><strong>Date:</strong> {new Date().toLocaleDateString('fr-FR')}</div>
-                  <div><strong>No. Commande:</strong> {viewingOrder.id?.slice(-8).toUpperCase()}</div>
-                </div>
-              </div>
+            {/* Hidden Order Export Element (100% French Bon de Commande matching Customer Portal) */}
+            {(() => {
+              const activeOrder = pdfTargetOrder || viewingOrder;
+              if (!activeOrder) {
+                return <div ref={orderExportRef} style={{ display: 'none' }} />;
+              }
 
-              <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid #333', tableLayout: 'fixed' }}>
-                <thead>
-                  <tr style={{ background: '#f8f9fa' }}>
-                    <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '140px', fontWeight: 'bold', fontSize: '13px' }}>Image</th>
-                    <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', fontWeight: 'bold', fontSize: '13px' }}>Désignation</th>
-                    <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '60px', fontWeight: 'bold', fontSize: '13px' }}>Qté</th>
-                    <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '90px', fontWeight: 'bold', fontSize: '13px' }}>P.U.</th>
-                    <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '100px', fontWeight: 'bold', fontSize: '13px' }}>Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(() => {
-                    const categories = [
-                      { id: 'bassine', label: 'Bassine', check: (n: string) => n.toLowerCase().includes('盆') || n.toLowerCase().includes('bassine') },
-                      { id: 'seau', label: 'Seau', check: (n: string) => n.toLowerCase().includes('桶') || n.toLowerCase().includes('尿壶') || n.toLowerCase().includes('seau') || n.toLowerCase().includes('urinal') },
-                      { id: 'satala', label: 'Satalas&Goblet&Tasse', check: (n: string) => (n.toLowerCase().includes('壶') || n.toLowerCase().includes('杯') || n.toLowerCase().includes('阿拉丁神灯') || n.toLowerCase().includes('satala') || n.toLowerCase().includes('goblet') || n.toLowerCase().includes('tasse') || n.toLowerCase().includes('lampe')) && !(n.toLowerCase().includes('尿壶') || n.toLowerCase().includes('urinal')) },
-                      { id: 'chaise', label: 'Tabouret&Chaise', check: (n: string) => n.toLowerCase().includes('椅') || n.toLowerCase().includes('凳') || n.toLowerCase().includes('chaise') || n.toLowerCase().includes('tabouret') },
-                      { id: 'autres', label: 'Autres', check: () => true }
-                    ];
+              const orderCustomer = activeOrder.customer || customers.find(c => c['客户代码'] === activeOrder.customerCode || c['客户名'] === activeOrder.customerName);
+              const customerName = orderCustomer?.['客户名'] || activeOrder.customerName || 'Client';
+              const customerCode = orderCustomer?.['客户代码'] || activeOrder.customerCode || '-';
+              const customerPhone = orderCustomer?.['电话号码'] || '-';
+              const customerRegion = orderCustomer?.['所在地区'] || activeOrder.city || '-';
 
-                    const grouped: Record<string, any[]> = {};
-                    categories.forEach(c => grouped[c.id] = []);
+              const orderDate = activeOrder.businessDate 
+                ? activeOrder.businessDate 
+                : (activeOrder.createdAt?.seconds 
+                    ? new Date(activeOrder.createdAt.seconds * 1000).toLocaleDateString('fr-FR')
+                    : (activeOrder.createdAt?.toDate ? activeOrder.createdAt.toDate().toLocaleDateString('fr-FR') : new Date().toLocaleDateString('fr-FR')));
 
-                    viewingOrder.items?.forEach((item: any) => {
-                      const name = item.materialName || '';
-                      const cat = categories.find(c => c.check(name));
-                      if (cat) grouped[cat.id].push(item);
-                    });
+              const displayOrderNo = activeOrder.id?.toUpperCase().includes('NEW') 
+                ? 'NEW ORDER' 
+                : (activeOrder.id?.includes('-') ? activeOrder.id.toUpperCase() : (activeOrder.id?.length > 12 ? activeOrder.id.slice(-8).toUpperCase() : (activeOrder.id || '-').toUpperCase()));
 
-                    return categories.map(cat => {
-                      const items = grouped[cat.id];
-                      if (items.length === 0) return null;
-
-                      // Group by material code to sum quantities
-                      const materialGroups: Record<string, any> = {};
-                      items.forEach(item => {
-                        const code = item.materialCode;
-                        if (!materialGroups[code]) {
-                          materialGroups[code] = {
-                            ...item,
-                            quantity: 0,
-                            totalPrice: 0
-                          };
-                        }
-                        materialGroups[code].quantity += Number(item.quantity) || 0;
-                        materialGroups[code].totalPrice += Number(item.totalPrice) || 0;
-                      });
-                      
-                      const groupArray = Object.values(materialGroups);
-
-                      return (
-                        <React.Fragment key={cat.id}>
-                          <tr style={{ background: '#f8f9fa', breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                            <td colSpan={5} style={{ border: '1px solid #333', padding: '8px 10px', fontWeight: 'bold', fontSize: '14px', textAlign: 'left' }}>
-                              {cat.label}
-                            </td>
-                          </tr>
-                          {groupArray.map((item: any, idx: number) => {
-                            const priceData = prices.find(p => p['物料代码'] === item.materialCode);
-                            const imageUrl = priceData?.['图片'];
-                            
-                            return (
-                              <tr key={`${cat.id}-${idx}`} style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                                <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle' }}>
-                                  {imageUrl ? (
-                                    <div style={{ width: '140px', height: '140px', margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8f9fa', overflow: 'hidden' }}>
-                                      <img 
-                                        src={imageUrl} 
-                                        alt="" 
-                                        crossOrigin="anonymous"
-                                        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
-                                        referrerPolicy="no-referrer"
-                                      />
-                                    </div>
-                                  ) : null}
-                                </td>
-                                <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px', textTransform: 'uppercase', fontWeight: 'bold' }}>
-                                  {translateProduct(item)}
-                                </td>
-                                <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px' }}>
-                                  {item.quantity}
-                                </td>
-                                <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px' }}>
-                                  {Math.round(item.unitPrice).toLocaleString()}
-                                </td>
-                                <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px', fontWeight: 'bold' }}>
-                                  {Math.round(item.totalPrice).toLocaleString()}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </React.Fragment>
-                      );
-                    });
-                  })()}
-                  <tr>
-                    <td colSpan={4} style={{ border: '1px solid #333', padding: '10px', textAlign: 'right', fontWeight: 'bold', fontSize: '16px' }}>
-                      Total Général
-                    </td>
-                    <td style={{ border: '1px solid #333', padding: '10px', textAlign: 'right', fontWeight: 'bold', fontSize: '16px', background: '#f8f9fa' }}>
-                      {Math.round(viewingOrder.totalAmount || 0).toLocaleString()}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-
-              {/* Situation des Impayés Client */}
-              {userRole !== '仓管' && (() => {
-                const stats = getCustomerCreditStats(viewingOrder.customer);
-                const { totalCredit, totalDebt, remainingCredit, custDebts, overdueDebts, overdueTotal } = stats;
-                if (!custDebts || (custDebts.length === 0 && totalCredit === 0)) return null;
-
-                return (
-                  <div style={{ marginTop: '20px', border: '1.5px solid #dc2626', borderRadius: '6px', padding: '12px 14px', background: '#fffaf0', breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', borderBottom: '1px solid #fecaca', paddingBottom: '6px', flexWrap: 'wrap', gap: '8px' }}>
-                      <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#991b1b' }}>
-                        Situation Financière & Impayés Client (客户信用与欠款明细)
-                      </div>
-                      <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#111827', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                        <span>Total Crédit (总信用额度): <strong style={{ color: '#1d4ed8' }}>CFA {Math.round(totalCredit).toLocaleString('zh-CN')}</strong></span>
-                        <span>Crédit Restant (所剩信用额度): <strong style={{ color: remainingCredit < 0 ? '#b91c1c' : '#15803d' }}>CFA {Math.round(remainingCredit).toLocaleString('zh-CN')}{remainingCredit < 0 ? ' (Dépassement)' : ''}</strong></span>
-                        <span>Total Impayés (总欠款): <strong style={{ color: '#b91c1c' }}>CFA {Math.round(totalDebt).toLocaleString('zh-CN')}</strong></span>
-                      </div>
-                    </div>
-
-                    {overdueTotal > 0 && (
-                      <div style={{ background: '#fee2e2', border: '1px solid #f87171', color: '#991b1b', padding: '6px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>⚠️ Impayés Échus (已逾期欠款):</span>
-                        <span>CFA {Math.round(overdueTotal).toLocaleString('zh-CN')} ({overdueDebts.length} échéance(s) en retard)</span>
-                      </div>
-                    )}
-
-                    {custDebts.length > 0 && (
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', background: '#ffffff', border: '1px solid #e5e7eb' }}>
-                        <thead>
-                          <tr style={{ background: '#f3f4f6', color: '#374151' }}>
-                            <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'left', fontWeight: 'bold' }}>Date d'échéance (到期日)</th>
-                            <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', fontWeight: 'bold' }}>Montant (金额 CFA)</th>
-                            <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'center', fontWeight: 'bold', width: '140px' }}>Statut (状态)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {custDebts.map((d, dIdx) => {
-                            const isOd = checkIsOverdue(d.dueDate);
-                            return (
-                              <tr key={dIdx} style={{ background: isOd ? '#fff5f5' : '#ffffff' }}>
-                                <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', fontWeight: isOd ? 'bold' : 'normal', color: isOd ? '#dc2626' : '#1f2937' }}>
-                                  {d.dueDate}
-                                </td>
-                                <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', fontWeight: isOd ? 'bold' : 'normal', color: isOd ? '#dc2626' : '#1f2937' }}>
-                                  CFA {Math.round(d.amount).toLocaleString('zh-CN')}
-                                </td>
-                                <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'center' }}>
-                                  {isOd ? (
-                                    <span style={{ color: '#dc2626', fontWeight: 'bold', background: '#fee2e2', padding: '2px 6px', borderRadius: '3px', fontSize: '11px', display: 'inline-block' }}>
-                                      ÉCHU / 已逾期
-                                    </span>
-                                  ) : (
-                                    <span style={{ color: '#15803d', fontWeight: '500', fontSize: '11px', display: 'inline-block' }}>
-                                      En cours / 正常
-                                    </span>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    )}
+              return (
+                <div ref={orderExportRef} style={{ display: 'none', position: 'static', width: '200mm', background: 'white', padding: '10mm', boxSizing: 'border-box', color: 'black', fontFamily: 'Arial, sans-serif' }}>
+                  <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+                    <h1 style={{ fontSize: '28px', margin: '0 0 10px 0', fontWeight: 'bold' }}>Bon de Commande</h1>
                   </div>
-                );
-              })()}
-            </div>
+                  
+                  <div style={{ marginBottom: '20px', fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
+                    <div>
+                      <div style={{ marginBottom: '5px' }}><strong>Client:</strong> {customerName}</div>
+                      <div style={{ marginBottom: '5px' }}><strong>Code Client:</strong> {customerCode}</div>
+                      <div style={{ marginBottom: '5px' }}><strong>Tél:</strong> {customerPhone}</div>
+                      <div><strong>Région:</strong> {customerRegion}</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ marginBottom: '5px' }}><strong>Date:</strong> {orderDate}</div>
+                      <div><strong>No. Commande:</strong> {displayOrderNo}</div>
+                    </div>
+                  </div>
+
+                  <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid #333', tableLayout: 'fixed' }}>
+                    <thead>
+                      <tr style={{ background: '#f8f9fa' }}>
+                        <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '140px', fontWeight: 'bold', fontSize: '13px' }}>Image</th>
+                        <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', fontWeight: 'bold', fontSize: '13px' }}>Désignation</th>
+                        <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '60px', fontWeight: 'bold', fontSize: '13px' }}>Qté</th>
+                        <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '90px', fontWeight: 'bold', fontSize: '13px' }}>P.U.</th>
+                        <th style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', width: '100px', fontWeight: 'bold', fontSize: '13px' }}>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        const categories = [
+                          { id: 'bassine', label: 'Bassine', check: (n: string) => n.toLowerCase().includes('盆') || n.toLowerCase().includes('bassine') },
+                          { id: 'seau', label: 'Seau', check: (n: string) => n.toLowerCase().includes('桶') || n.toLowerCase().includes('尿壶') || n.toLowerCase().includes('seau') || n.toLowerCase().includes('urinal') },
+                          { id: 'satala', label: 'Satalas&Goblet&Tasse', check: (n: string) => (n.toLowerCase().includes('壶') || n.toLowerCase().includes('杯') || n.toLowerCase().includes('阿拉丁神灯') || n.toLowerCase().includes('satala') || n.toLowerCase().includes('goblet') || n.toLowerCase().includes('tasse') || n.toLowerCase().includes('lampe')) && !(n.toLowerCase().includes('尿壶') || n.toLowerCase().includes('urinal')) },
+                          { id: 'chaise', label: 'Tabouret&Chaise', check: (n: string) => n.toLowerCase().includes('椅') || n.toLowerCase().includes('凳') || n.toLowerCase().includes('chaise') || n.toLowerCase().includes('tabouret') },
+                          { id: 'autres', label: 'Autres', check: () => true }
+                        ];
+
+                        const grouped: Record<string, any[]> = {};
+                        categories.forEach(c => grouped[c.id] = []);
+
+                        activeOrder.items?.forEach((item: any) => {
+                          const name = `${item.materialName || ''} ${item.frenchName || ''} ${item.materialCode || ''}`;
+                          const cat = categories.find(c => c.check(name));
+                          if (cat) grouped[cat.id].push(item);
+                        });
+
+                        return categories.map(cat => {
+                          const items = grouped[cat.id];
+                          if (items.length === 0) return null;
+
+                          // Group by material code to sum quantities
+                          const materialGroups: Record<string, any> = {};
+                          items.forEach(item => {
+                            const code = item.materialCode || item.materialName;
+                            if (!materialGroups[code]) {
+                              materialGroups[code] = {
+                                ...item,
+                                quantity: 0,
+                                totalPrice: 0
+                              };
+                            }
+                            materialGroups[code].quantity += Number(item.quantity) || 0;
+                            materialGroups[code].totalPrice += Number(item.totalPrice) || (Number(item.quantity) * Number(item.unitPrice)) || 0;
+                          });
+                          
+                          const groupArray = Object.values(materialGroups);
+
+                          return (
+                            <React.Fragment key={cat.id}>
+                              <tr style={{ background: '#f8f9fa', breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                                <td colSpan={5} style={{ border: '1px solid #333', padding: '8px 10px', fontWeight: 'bold', fontSize: '14px', textAlign: 'left' }}>
+                                  {cat.label}
+                                </td>
+                              </tr>
+                              {groupArray.map((item: any, idx: number) => {
+                                const priceData = findPriceItem(item);
+                                const imageUrl = priceData?.['图片'];
+                                
+                                return (
+                                  <tr key={`${cat.id}-${idx}`} style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                                    <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle' }}>
+                                      {imageUrl ? (
+                                        <div style={{ width: '140px', height: '140px', margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8f9fa', overflow: 'hidden' }}>
+                                          <img 
+                                            src={imageUrl} 
+                                            alt="" 
+                                            crossOrigin="anonymous"
+                                            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
+                                            referrerPolicy="no-referrer"
+                                          />
+                                        </div>
+                                      ) : null}
+                                    </td>
+                                    <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px', textTransform: 'uppercase', fontWeight: 'bold' }}>
+                                      {translateProductForPdf(item)}
+                                    </td>
+                                    <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px' }}>
+                                      {item.quantity}
+                                    </td>
+                                    <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px' }}>
+                                      {Math.round(item.unitPrice).toLocaleString()}
+                                    </td>
+                                    <td style={{ border: '1px solid #333', padding: '8px', textAlign: 'center', verticalAlign: 'middle', fontSize: '14px', fontWeight: 'bold' }}>
+                                      {Math.round(item.totalPrice).toLocaleString()}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </React.Fragment>
+                          );
+                        });
+                      })()}
+                      <tr>
+                        <td colSpan={4} style={{ border: '1px solid #333', padding: '10px', textAlign: 'right', fontWeight: 'bold', fontSize: '16px' }}>
+                          Total Général
+                        </td>
+                        <td style={{ border: '1px solid #333', padding: '10px', textAlign: 'right', fontWeight: 'bold', fontSize: '16px', background: '#f8f9fa' }}>
+                          {Math.round(activeOrder.totalAmount || 0).toLocaleString()}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Situation Financière & Impayés Client (100% French format matching Customer Portal) */}
+                  {userRole !== '仓管' && (() => {
+                    const stats = getCustomerCreditStats(orderCustomer || activeOrder.customer);
+                    const { totalCredit, totalDebt, remainingCredit, custDebts, overdueDebts, overdueTotal } = stats;
+                    if (!custDebts || (custDebts.length === 0 && totalCredit === 0)) return null;
+
+                    return (
+                      <div style={{ marginTop: '20px', border: '1.5px solid #dc2626', borderRadius: '6px', padding: '12px 14px', background: '#fffaf0', breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', borderBottom: '1px solid #fecaca', paddingBottom: '6px', flexWrap: 'wrap', gap: '8px' }}>
+                          <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#991b1b' }}>
+                            Situation Financière & Impayés Client
+                          </div>
+                          <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#111827', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                            <span>Total Crédit : <strong style={{ color: '#1d4ed8' }}>CFA {Math.round(totalCredit).toLocaleString('fr-FR')}</strong></span>
+                            <span>Crédit Restant : <strong style={{ color: remainingCredit < 0 ? '#b91c1c' : '#15803d' }}>CFA {Math.round(remainingCredit).toLocaleString('fr-FR')}{remainingCredit < 0 ? ' (Dépassement)' : ''}</strong></span>
+                            <span>Total Impayés : <strong style={{ color: '#b91c1c' }}>CFA {Math.round(totalDebt).toLocaleString('fr-FR')}</strong></span>
+                          </div>
+                        </div>
+
+                        {overdueTotal > 0 && (
+                          <div style={{ background: '#fee2e2', border: '1px solid #f87171', color: '#991b1b', padding: '6px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span>⚠️ Impayés Échus :</span>
+                            <span>CFA {Math.round(overdueTotal).toLocaleString('fr-FR')} ({overdueDebts.length} échéance(s) en retard)</span>
+                          </div>
+                        )}
+
+                        {custDebts.length > 0 && (
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', background: '#ffffff', border: '1px solid #e5e7eb' }}>
+                            <thead>
+                              <tr style={{ background: '#f3f4f6', color: '#374151' }}>
+                                <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'left', fontWeight: 'bold', width: '130px' }}>N° Commande</th>
+                                <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'left', fontWeight: 'bold' }}>Date d'échéance</th>
+                                <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', fontWeight: 'bold' }}>Montant (CFA)</th>
+                                <th style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'center', fontWeight: 'bold', width: '110px' }}>Statut</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {custDebts.map((d, dIdx) => {
+                                const isOd = checkIsOverdue(d.dueDate);
+                                return (
+                                  <tr key={dIdx} style={{ background: isOd ? '#fff5f5' : '#ffffff' }}>
+                                    <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', fontWeight: 'bold', fontFamily: 'monospace', color: '#1e40af' }}>
+                                      {d.orderNo ? `#${d.orderNo}` : '-'}
+                                    </td>
+                                    <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', fontWeight: isOd ? 'bold' : 'normal', color: isOd ? '#dc2626' : '#1f2937' }}>
+                                      {d.dueDate}
+                                    </td>
+                                    <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', fontWeight: isOd ? 'bold' : 'normal', color: isOd ? '#dc2626' : '#1f2937' }}>
+                                      CFA {Math.round(d.amount).toLocaleString('fr-FR')}
+                                    </td>
+                                    <td style={{ border: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'center' }}>
+                                      {isOd ? (
+                                        <span style={{ color: '#dc2626', fontWeight: 'bold', background: '#fee2e2', padding: '2px 6px', borderRadius: '3px', fontSize: '11px', display: 'inline-block' }}>
+                                          ÉCHU
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: '#15803d', fontWeight: '500', fontSize: '11px', display: 'inline-block' }}>
+                                          À jour
+                                        </span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -4748,7 +5033,39 @@ export default function App() {
                             const isOd = checkIsOverdue(d.dueDate);
                             return (
                               <div key={dIdx} className={`flex justify-between items-center py-1 px-1.5 rounded ${isOd ? 'bg-red-50 text-red-700 font-bold' : 'text-gray-700 border-b border-gray-50 last:border-0'}`}>
-                                <span>{d.dueDate} {isOd ? `(${t('已逾期', 'En retard')})` : ''}</span>
+                                <div className="flex items-center gap-1.5">
+                                  {d.orderNo && (
+                                    <div className="inline-flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={generatingPdf && pdfTargetOrder?.id === d.orderNo}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDownloadDebtPdf(d);
+                                        }}
+                                        className="text-blue-600 hover:text-blue-800 hover:underline font-bold cursor-pointer inline-flex items-center gap-1 group font-mono text-xs disabled:opacity-50"
+                                        title={t('点击直接下载PDF', 'Cliquer pour télécharger directement le Bon de Commande (PDF)')}
+                                      >
+                                        {generatingPdf && pdfTargetOrder?.id === d.orderNo ? (
+                                          <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-600 border-t-transparent inline-block shrink-0" />
+                                        ) : (
+                                          <Download className="w-3 h-3 text-blue-500 group-hover:text-blue-700 shrink-0" />
+                                        )}
+                                        <span>#{d.orderNo}</span>
+                                        <span className="text-[9px] bg-blue-100 text-blue-700 px-1 rounded font-sans font-semibold">PDF</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setViewingDebtOrder(d)}
+                                        className="p-0.5 text-gray-400 hover:text-blue-600 rounded transition-colors cursor-pointer"
+                                        title={t('查看出库明细', 'Voir les détails')}
+                                      >
+                                        <Eye className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
+                                  <span>{d.dueDate} {isOd ? `(${t('已逾期', 'En retard')})` : ''}</span>
+                                </div>
                                 <span>CFA {Math.round(d.amount).toLocaleString('zh-CN')}</span>
                               </div>
                             );
@@ -5014,7 +5331,39 @@ export default function App() {
                             const isOd = checkIsOverdue(d.dueDate);
                             return (
                               <div key={dIdx} className={`flex justify-between items-center py-0.5 border-b border-gray-50 last:border-0 ${isOd ? 'text-red-600 font-bold' : 'text-gray-700'}`}>
-                                <span>{d.dueDate} {isOd ? `(${t('已逾期', 'En retard')})` : ''}</span>
+                                <div className="flex items-center gap-1.5">
+                                  {d.orderNo && (
+                                    <div className="inline-flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={generatingPdf && pdfTargetOrder?.id === d.orderNo}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDownloadDebtPdf(d);
+                                        }}
+                                        className="text-blue-600 hover:text-blue-800 hover:underline font-bold cursor-pointer inline-flex items-center gap-1 group font-mono text-xs disabled:opacity-50"
+                                        title={t('点击直接下载PDF', 'Cliquer pour télécharger directement le Bon de Commande (PDF)')}
+                                      >
+                                        {generatingPdf && pdfTargetOrder?.id === d.orderNo ? (
+                                          <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-600 border-t-transparent inline-block shrink-0" />
+                                        ) : (
+                                          <Download className="w-3 h-3 text-blue-500 group-hover:text-blue-700 shrink-0" />
+                                        )}
+                                        <span>#{d.orderNo}</span>
+                                        <span className="text-[9px] bg-blue-100 text-blue-700 px-1 rounded font-sans font-semibold">PDF</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setViewingDebtOrder(d)}
+                                        className="p-0.5 text-gray-400 hover:text-blue-600 rounded transition-colors cursor-pointer"
+                                        title={t('查看出库明细', 'Voir les détails')}
+                                      >
+                                        <Eye className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
+                                  <span>{d.dueDate} {isOd ? `(${t('已逾期', 'En retard')})` : ''}</span>
+                                </div>
                                 <span>CFA {Math.round(d.amount).toLocaleString('zh-CN')}</span>
                               </div>
                             );
@@ -5034,7 +5383,7 @@ export default function App() {
               
               {groupedOrderItems.length === 0 ? (
                 <div className="text-center text-gray-400 py-8 text-sm">
-                  暂无物料，请返回上一步添加
+                  {t('暂无物料，请返回上一步添加', 'Aucun article. Veuillez retourner à l\'étape précédente pour en ajouter.')}
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -5124,7 +5473,7 @@ export default function App() {
                                 <button 
                                   onClick={() => handleRemoveItem(item.id, item.materialCode)}
                                   className="absolute right-0 top-1/2 -translate-y-1/2 text-red-400 hover:text-red-600"
-                                  title="移除此颜色"
+                                  title={t('移除此颜色', 'Supprimer cette couleur')}
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </button>
@@ -5180,7 +5529,7 @@ export default function App() {
                 className="theme-input w-full p-3 text-sm min-h-[80px]"
                 value={orderRemarks}
                 onChange={(e) => setOrderRemarks(e.target.value)}
-                placeholder="在此输入订单备注留言（选填）..."
+                placeholder={t('在此输入订单备注留言（选填）...', 'Entrez vos remarques de commande ici (facultatif)...')}
               />
             </div>
 
@@ -5720,6 +6069,269 @@ export default function App() {
             style={{maxHeight: '90vh', maxWidth: '90vw', objectFit: 'contain', borderRadius: '8px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'}}
             referrerPolicy="no-referrer"
           />
+        </div>
+      )}
+
+      {/* Debt Order Details Modal (点击订单号查看订单信息) */}
+      {viewingDebtOrder && (
+        <div 
+          className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[99992] flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+          onClick={() => setViewingDebtOrder(null)}
+        >
+          <div 
+            className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full my-auto border border-gray-200 flex flex-col max-h-[90vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/80">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      disabled={generatingPdf && pdfTargetOrder?.id === (viewingDebtOrder.orderNo || 'COMMANDE')}
+                      onClick={() => handleDownloadDebtPdf(viewingDebtOrder)}
+                      className="text-base font-bold text-blue-600 hover:text-blue-800 hover:underline font-mono inline-flex items-center gap-1.5 cursor-pointer text-left"
+                      title={t('点击直接下载PDF', 'Cliquer pour télécharger directement le Bon de Commande (PDF)')}
+                    >
+                      <span>{t('订单详情', 'Commande')} #{viewingDebtOrder.orderNo || t('出库单', 'Détails')}</span>
+                      {generatingPdf && pdfTargetOrder?.id === (viewingDebtOrder.orderNo || 'COMMANDE') ? (
+                        <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-blue-600 border-t-transparent shrink-0" />
+                      ) : (
+                        <Download className="w-4 h-4 text-blue-600 shrink-0" />
+                      )}
+                      <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-sans font-semibold">PDF</span>
+                    </button>
+                    {checkIsOverdue(viewingDebtOrder.dueDate) ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse" />
+                        {t('已逾期', 'ÉCHU')}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700 border border-emerald-200">
+                        {t('待结未逾期', 'À JOUR')}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    {t('出库单与客户待结算欠款明细', 'Détails du bon de sortie et impayés client')}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingDebtOrder(null)}
+                className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-200 rounded-lg transition-colors cursor-pointer"
+                title={t('关闭', 'Fermer')}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-5 overflow-y-auto space-y-4">
+              {/* Overview Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">{t('到期日', "Date d'Échéance")}</span>
+                  <strong className={`text-xs sm:text-sm font-mono block ${checkIsOverdue(viewingDebtOrder.dueDate) ? 'text-red-700 font-bold' : 'text-gray-900'}`}>
+                    {viewingDebtOrder.dueDate}
+                  </strong>
+                </div>
+
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">{t('业务日期', 'Date Opération')}</span>
+                  <strong className="text-xs sm:text-sm font-mono text-gray-900 block">
+                    {viewingDebtOrder.businessDate || '-'}
+                  </strong>
+                </div>
+
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">{t('销售员', 'Commercial')}</span>
+                  <strong className="text-xs sm:text-sm text-gray-900 block truncate">
+                    {viewingDebtOrder.salesperson || '-'}
+                  </strong>
+                </div>
+
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <span className="text-[11px] text-gray-500 block mb-0.5">{t('城市/区域', 'Ville')}</span>
+                  <strong className="text-xs sm:text-sm text-gray-900 block truncate">
+                    {viewingDebtOrder.city || '-'}
+                  </strong>
+                </div>
+              </div>
+
+              {/* Financials */}
+              <div className="p-3.5 bg-blue-50/70 border border-blue-100 rounded-xl flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div>
+                    <span className="text-[11px] text-gray-500 block">{t('订单总额', 'Total Commande')}</span>
+                    <strong className="text-sm font-bold text-gray-900 font-mono">
+                      CFA {Math.round(viewingDebtOrder.totalAmount || viewingDebtOrder.amount).toLocaleString('zh-CN')}
+                    </strong>
+                  </div>
+                  {viewingDebtOrder.settledAmount !== undefined && viewingDebtOrder.settledAmount > 0 && (
+                    <div>
+                      <span className="text-[11px] text-emerald-700 block">{t('已结金额', 'Déjà Réglé')}</span>
+                      <strong className="text-sm font-bold text-emerald-700 font-mono">
+                        CFA {Math.round(viewingDebtOrder.settledAmount).toLocaleString('zh-CN')}
+                      </strong>
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-right sm:text-right">
+                  <span className="text-[11px] text-red-700 font-semibold block">{t('待结算金额', 'Montant Impayé')}</span>
+                  <strong className="text-base font-bold text-red-700 font-mono">
+                    CFA {Math.round(viewingDebtOrder.amount).toLocaleString('zh-CN')}
+                  </strong>
+                </div>
+              </div>
+
+              {/* Remarks */}
+              {viewingDebtOrder.remarks && (
+                <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-900 leading-relaxed">
+                  <strong className="block text-amber-950 font-semibold mb-1">
+                    {t('订单备注', 'Remarques')} :
+                  </strong>
+                  <div className="whitespace-pre-wrap font-mono text-[11px] text-amber-900">
+                    {viewingDebtOrder.remarks}
+                  </div>
+                </div>
+              )}
+
+              {/* Items Table */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
+                    <Package className="w-4 h-4 text-gray-500" />
+                    {t('订购商品物料明细', 'Articles de la Commande')}
+                    {viewingDebtOrder.items && (
+                      <span className="text-gray-400 font-normal text-[11px]">
+                        ({viewingDebtOrder.items.length} {t('项', 'articles')})
+                      </span>
+                    )}
+                  </h4>
+                </div>
+
+                {viewingDebtOrder.items && viewingDebtOrder.items.length > 0 ? (
+                  <div className="border border-gray-200 rounded-xl overflow-hidden shadow-2xs">
+                    <div className="overflow-x-auto max-h-64">
+                      <table className="w-full text-left text-xs border-collapse font-mono">
+                        <thead className="bg-gray-50 text-gray-600 font-semibold sticky top-0 border-b border-gray-200 z-10">
+                          <tr>
+                            <th className="p-2.5 text-center w-10">#</th>
+                            <th className="p-2.5 font-sans">{t('物料名称', 'Produit')}</th>
+                            <th className="p-2.5 font-sans">{t('品类', 'Catégorie')}</th>
+                            <th className="p-2.5 text-right font-sans">{t('数量', 'Quantité')}</th>
+                            <th className="p-2.5 text-right font-sans">{t('单价', 'P.U (CFA)')}</th>
+                            <th className="p-2.5 text-right font-sans">{t('总价', 'Total (CFA)')}</th>
+                            <th className="p-2.5 text-right font-sans text-red-700">{t('待结', 'Impayé')}</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 text-gray-800">
+                          {viewingDebtOrder.items.map((item, itIdx) => (
+                            <tr key={itIdx} className="hover:bg-gray-50/80 transition-colors">
+                              <td className="p-2.5 text-center text-gray-400 text-[11px]">{itIdx + 1}</td>
+                              <td className="p-2.5 font-semibold text-gray-900 font-sans">
+                                {item.materialName}
+                              </td>
+                              <td className="p-2.5 text-gray-500 font-sans text-[11px]">
+                                {item.category || '-'}
+                              </td>
+                              <td className="p-2.5 text-right font-bold text-gray-900">
+                                {item.quantity.toLocaleString('zh-CN')}
+                              </td>
+                              <td className="p-2.5 text-right text-gray-600">
+                                {Math.round(item.unitPrice).toLocaleString('zh-CN')}
+                              </td>
+                              <td className="p-2.5 text-right font-semibold text-gray-900">
+                                {Math.round(item.totalPrice).toLocaleString('zh-CN')}
+                              </td>
+                              <td className="p-2.5 text-right font-bold text-red-700">
+                                {Math.round(item.unsettledAmount).toLocaleString('zh-CN')}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-gray-50/90 font-bold border-t border-gray-200 text-gray-900 sticky bottom-0">
+                          <tr>
+                            <td colSpan={3} className="p-2.5 text-right font-sans">
+                              {t('合计', 'Totaux')} :
+                            </td>
+                            <td className="p-2.5 text-right text-blue-700">
+                              {viewingDebtOrder.items.reduce((s, it) => s + it.quantity, 0).toLocaleString('zh-CN')}
+                            </td>
+                            <td className="p-2.5"></td>
+                            <td className="p-2.5 text-right text-gray-900">
+                              CFA {Math.round(viewingDebtOrder.items.reduce((s, it) => s + it.totalPrice, 0)).toLocaleString('zh-CN')}
+                            </td>
+                            <td className="p-2.5 text-right text-red-700">
+                              CFA {Math.round(viewingDebtOrder.items.reduce((s, it) => s + it.unsettledAmount, 0)).toLocaleString('zh-CN')}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 text-center text-xs text-gray-500">
+                    {t('暂无详细商品清单', 'Aucun article détaillé.')}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3.5 border-t border-gray-100 flex items-center justify-between bg-gray-50/80 flex-wrap gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  disabled={generatingPdf && pdfTargetOrder?.id === (viewingDebtOrder.orderNo || 'COMMANDE')}
+                  onClick={() => handleDownloadDebtPdf(viewingDebtOrder)}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs"
+                  title={t('下载订购单PDF', 'Télécharger Bon de Commande (PDF)')}
+                >
+                  {generatingPdf && pdfTargetOrder?.id === (viewingDebtOrder.orderNo || 'COMMANDE') ? (
+                    <div className="animate-spin rounded-full h-3.5 w-3.5 border-2 border-white border-t-transparent" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5 text-white" />
+                  )}
+                  <span>{t('下载订购单PDF', 'Télécharger Bon de Commande (PDF)')}</span>
+                </button>
+                {(() => {
+                  const matchedSystemOrder = orders.find(o => o.id === viewingDebtOrder.orderNo);
+                  if (matchedSystemOrder) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewingDebtOrder(null);
+                          setViewingOrder(matchedSystemOrder);
+                          setCurrentView('detail');
+                        }}
+                        className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Eye className="w-4 h-4 text-blue-600" />
+                        <span>{t('查看系统订单详情', 'Voir la commande système')}</span>
+                      </button>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingDebtOrder(null)}
+                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs font-bold rounded-lg transition-colors cursor-pointer ml-auto"
+              >
+                {t('关闭', 'Fermer')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
